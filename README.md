@@ -1,5 +1,7 @@
 # Editor Visual · 3.9.0
 
+Projeto open source sob a licença MIT. Consulte [LICENSE](LICENSE) para os termos.
+
 Aplicativo Python/Qt para macOS, com velocidade automática baseada no script `00 Editor s corte - 00 Final.py` fornecido em 28/10/2026. Organizado em entrada, edição, saída e logs. Não depende de servidor ou navegador.
 
 Janela ampla de 1340 × 740, com todas as seções visíveis sem rolagem da janela. A área de arrastar arquivos fica à esquerda, com a lista abaixo, e as opções de edição à direita; as duas barras de progresso têm 4 pixels de altura e ficam agrupadas. Apenas as listas de arquivos e logs têm rolagem interna quando necessário.
