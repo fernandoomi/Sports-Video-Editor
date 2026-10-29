@@ -7,6 +7,7 @@ import os
 import threading
 import sys
 import time
+import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,7 +17,7 @@ from PySide6.QtGui import QDesktopServices, QRegularExpressionValidator, QValida
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFrame, QGridLayout, QStackedLayout,
+    QApplication, QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFrame, QGridLayout, QStackedLayout, QTabWidget, QSpinBox, QInputDialog, QColorDialog,
     QHBoxLayout, QLabel, QLineEdit, QListWidget, QMainWindow, QMessageBox,
     QPlainTextEdit, QProgressBar, QPushButton, QSizePolicy, QSlider, QVBoxLayout, QWidget,
 )
@@ -115,6 +116,41 @@ class PlaybackDialog(QDialog):
             self.close()
             return
         super().keyPressEvent(event)
+
+
+class WatermarkDialog(QDialog):
+    def __init__(self, values, text='@bemcorrido', parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('Marca-d’água avançada')
+        self.resize(430, 520)
+        form = QGridLayout(self)
+        self.size = QSpinBox(); self.size.setRange(8, 200); self.size.setValue(values.get('size',36))
+        self.opacity = QDoubleSpinBox(); self.opacity.setRange(.05,1); self.opacity.setSingleStep(.05); self.opacity.setValue(values.get('opacity',.5))
+        self.anchor = QComboBox()
+        for n,v in [('Superior esquerdo','tl'),('Superior centro','tc'),('Superior direito','tr'),('Meio esquerdo','ml'),('Centro','mc'),('Meio direito','mr'),('Inferior esquerdo','bl'),('Inferior centro','bc'),('Inferior direito','br')]: self.anchor.addItem(n,v)
+        self.anchor.setCurrentIndex(max(0,self.anchor.findData(values.get('anchor','br'))))
+        self.x = QSpinBox(); self.x.setRange(-500,500); self.x.setValue(values.get('x',20))
+        self.y = QSpinBox(); self.y.setRange(-500,500); self.y.setValue(values.get('y',20))
+        self.font = QComboBox(); self.font.addItems(['Arial','Helvetica','Verdana','Georgia','Courier New']); self.font.setCurrentText(values.get('font','Arial'))
+        self.bold=QCheckBox('Negrito'); self.bold.setChecked(values.get('bold',False))
+        self.italic=QCheckBox('Itálico'); self.italic.setChecked(values.get('italic',False))
+        self.underline=QCheckBox('Sublinhado'); self.underline.setChecked(values.get('underline',False))
+        self.shadow=QCheckBox('Sombra'); self.shadow.setChecked(values.get('shadow',False))
+        self.color=QComboBox()
+        self.colors=[('Branco','white'),('Preto','black'),('Vermelho','red'),('Verde','lime'),('Azul','blue'),('Amarelo','yellow'),('Ciano','cyan'),('Magenta','magenta')]
+        for a,b in self.colors:self.color.addItem(a,b)
+        self.color.setCurrentIndex(max(0,self.color.findData(values.get('color','white'))))
+        preview=QLabel(text or 'Texto da marca-d’água'); preview.setAlignment(Qt.AlignCenter); preview.setMinimumHeight(110)
+        rgba={'white':'255,255,255','black':'0,0,0','red':'255,0,0','lime':'0,255,0','blue':'0,0,255','yellow':'255,255,0','cyan':'0,255,255','magenta':'255,0,255'}[self.color.currentData()]
+        preview.setStyleSheet(f'background:#28364a;color:rgba({rgba},{int(self.opacity.value()*255)});font-size:{min(36,self.size.value())}px;border:1px solid #65748b;')
+        form.addWidget(preview,0,0,1,2)
+        fields=[('Tamanho',self.size),('Transparência',self.opacity),('Âncora',self.anchor),('Deslocamento horizontal',self.x),('Deslocamento vertical',self.y),('Fonte',self.font),('Cor',self.color)]
+        for r,(label,widget) in enumerate(fields,1):form.addWidget(QLabel(label),r,0);form.addWidget(widget,r,1)
+        row=QHBoxLayout();[row.addWidget(w) for w in (self.bold,self.italic,self.underline,self.shadow)];form.addLayout(row,8,0,1,2)
+        buttons=QHBoxLayout();buttons.addStretch();ok=QPushButton('Aplicar');cancel=QPushButton('Cancelar');ok.clicked.connect(self.accept);cancel.clicked.connect(self.reject);buttons.addWidget(cancel);buttons.addWidget(ok);form.addLayout(buttons,9,0,1,2)
+
+    def values(self):
+        return dict(size=self.size.value(),opacity=self.opacity.value(),anchor=self.anchor.currentData(),x=self.x.value(),y=self.y.value(),font=self.font.currentText(),bold=self.bold.isChecked(),italic=self.italic.isChecked(),underline=self.underline.isChecked(),shadow=self.shadow.isChecked(),color=self.color.currentData())
 
 
 class FolderScan(QObject):
@@ -269,9 +305,9 @@ class Window(QMainWindow):
         self.start_timer.setTimerType(Qt.PreciseTimer)
         self.start_timer.setInterval(2000)
         self.start_timer.timeout.connect(self.launch_batch)
-        self.setWindowTitle('Editor Visual · 3.9')
-        self.resize(1340, 740)
-        self.setMinimumSize(1240, 680)
+        self.setWindowTitle('Sports Video Editor')
+        self.resize(1040, 700)
+        self.setMinimumSize(820, 600)
         content = QWidget()
         root = QVBoxLayout(content)
         root.setContentsMargins(16, 12, 16, 12)
@@ -287,9 +323,14 @@ class Window(QMainWindow):
         header.addWidget(subtitle)
         root.addLayout(header)
 
+        self.tabs = QTabWidget()
+        root.addWidget(self.tabs, 1)
+        input_page = QWidget()
+        input_layout = QVBoxLayout(input_page)
         workspace = QHBoxLayout()
         workspace.setSpacing(12)
-        root.addLayout(workspace, 1)
+        input_layout.addLayout(workspace)
+        self.tabs.addTab(input_page, '01  Entrada')
         self.inputs, entry = self.section('01   Entrada', workspace)
         workspace.setStretch(0, 5)
         self.scan_button = QPushButton('Buscar vídeos em pasta e subpastas…')
@@ -323,7 +364,10 @@ class Window(QMainWindow):
         row.addWidget(clear)
         file_column.addLayout(row)
 
-        self.settings, settings = self.section('02   Edição', workspace)
+        edit_page = QWidget()
+        edit_layout = QVBoxLayout(edit_page)
+        self.settings, settings = self.section('02   Edição', edit_layout)
+        self.tabs.addTab(edit_page, '02  Edição')
         settings.setAlignment(Qt.AlignTop)
         workspace.setStretch(1, 9)
         editing_columns = QHBoxLayout()
@@ -423,7 +467,13 @@ class Window(QMainWindow):
         grid.addLayout(limit_row, 8, 1)
         self.watermark = QCheckBox('Marca-d’água @bemcorrido')
         self.watermark.setChecked(True)
-        grid.addWidget(self.watermark, 9, 0)
+        self.watermark_text = QLineEdit('@bemcorrido')
+        self.watermark_text.textChanged.connect(self.schedule_preferences_save)
+        self.watermark_advanced = QPushButton('Avançado…')
+        self.watermark_values = dict(size=36, opacity=.5, anchor='br', x=20, y=20, font='Arial', bold=False, italic=False, underline=False, shadow=False, color='white')
+        self.watermark_advanced.clicked.connect(self.edit_watermark)
+        watermark_row=QHBoxLayout();watermark_row.addWidget(self.watermark);watermark_row.addWidget(self.watermark_text,1);watermark_row.addWidget(self.watermark_advanced)
+        grid.addLayout(watermark_row, 9, 0, 1, 2)
         self.codec = QComboBox()
         self.codec.addItem('HEVC · menor tamanho', 'hevc')
         self.codec.addItem('H.264 · maior compatibilidade', 'h264')
@@ -471,7 +521,7 @@ class Window(QMainWindow):
         preview = QVBoxLayout(preview_card)
         preview.setContentsMargins(10, 10, 10, 10)
         preview.setSpacing(4)
-        workspace.addWidget(preview_card)
+        edit_layout.addWidget(preview_card)
         preview_title = QLabel('Pré-visualização · original')
         preview_title.setObjectName('muted')
         preview_title.setToolTip('Exibe o vídeo selecionado na fila. As opções de edição são aplicadas na exportação.')
@@ -528,7 +578,16 @@ class Window(QMainWindow):
         self.update_speed()
         self.update_ramp()
 
-        self.destination, output = self.section('03   Saída', root)
+        export_page = QWidget()
+        export_layout = QVBoxLayout(export_page)
+        self.destination, output = self.section('03   Exportação', export_layout)
+        self.tabs.addTab(export_page, '03  Exportação')
+        preset_box=QHBoxLayout();preset_box.addWidget(QLabel('Presets XML (até 5):'))
+        self.preset_combo=QComboBox();self.preset_combo.setMinimumWidth(180);preset_box.addWidget(self.preset_combo,1)
+        save_preset=QPushButton('Salvar preset…');load_preset=QPushButton('Carregar')
+        save_preset.clicked.connect(self.save_preset);load_preset.clicked.connect(self.load_preset)
+        preset_box.addWidget(save_preset);preset_box.addWidget(load_preset)
+        export_layout.addLayout(preset_box);self.load_presets()
         destination_row = QHBoxLayout()
         self.folder = QLineEdit(str(Path.cwd() / '00 Final'))
         choose = QPushButton('Escolher pasta…')
@@ -565,12 +624,12 @@ class Window(QMainWindow):
         controls.addWidget(self.start)
         controls.addWidget(self.pause)
         controls.addWidget(self.cancel)
-        root.addLayout(controls)
+        export_layout.addLayout(controls)
         self.general_label = QLabel('Progresso geral')
         progress = QVBoxLayout()
         progress.setContentsMargins(0, 0, 0, 0)
         progress.setSpacing(3)
-        root.addLayout(progress)
+        export_layout.addLayout(progress)
         progress.addWidget(self.general_label)
         self.general = QProgressBar()
         self.general.setRange(0, 1000)
@@ -588,19 +647,19 @@ class Window(QMainWindow):
         logs_header = QHBoxLayout()
         logs_header.addWidget(QLabel('Logs de processamento'))
         logs_header.addStretch()
-        root.addLayout(logs_header)
+        export_layout.addLayout(logs_header)
         self.logs = QPlainTextEdit()
         self.logs.setReadOnly(True)
         self.logs.setMaximumBlockCount(2000)
         self.logs.setMinimumHeight(48)
         self.logs.setMaximumHeight(72)
-        root.addWidget(self.logs)
+        export_layout.addWidget(self.logs)
         bottom = QHBoxLayout()
         bottom.addStretch()
         self.exit_button = QPushButton('Sair')
         self.exit_button.clicked.connect(self.close)
         bottom.addWidget(self.exit_button)
-        root.addLayout(bottom)
+        export_layout.addLayout(bottom)
         self.open_output = QPushButton('Abrir pasta de saída')
         self.open_output.clicked.connect(self.reveal_output)
         logs_header.addWidget(self.open_output)
@@ -657,6 +716,56 @@ class Window(QMainWindow):
                  'codec', 'workers', 'fluency', 'folder', 'finish_action')
         return {name: getattr(self, name) for name in names}
 
+    def edit_watermark(self):
+        dialog=WatermarkDialog(self.watermark_values,self.watermark_text.text(),self)
+        if dialog.exec(): self.watermark_values=dialog.values();self.schedule_preferences_save()
+
+    def preset_file(self):
+        return Path.home()/'Documents'/'Sports Video Editor Presets.xml'
+
+    def load_presets(self):
+        self.presets=[]
+        try:
+            root=ET.parse(self.preset_file()).getroot()
+            self.presets=[(p.get('name','Preset'),{c.tag:c.text for c in p}) for p in root.findall('preset')][-5:]
+        except (OSError,ET.ParseError): pass
+        self.preset_combo.clear()
+        for name,_ in self.presets:self.preset_combo.addItem(name)
+
+    def save_preset(self):
+        name,ok=QInputDialog.getText(self,'Salvar preset','Nome do preset:')
+        if not ok or not name.strip():return
+        values={}
+        for n,w in self.preference_widgets().items():
+            values[n]=w.isChecked() if isinstance(w,QCheckBox) else w.currentData() if isinstance(w,QComboBox) else w.value() if isinstance(w,TimeControl) else w.text()
+        values.update(watermark_text=self.watermark_text.text(),watermark_values=json.dumps(self.watermark_values))
+        self.presets=[(n,v) for n,v in getattr(self,'presets',[]) if n!=name.strip()]
+        self.presets.append((name.strip(),values));self.presets=self.presets[-5:]
+        xml=ET.Element('presets',version='1')
+        for pname,vals in self.presets:
+            p=ET.SubElement(xml,'preset',name=pname)
+            for k,v in vals.items(): ET.SubElement(p,k).text=json.dumps(v,ensure_ascii=False)
+        self.preset_file().parent.mkdir(parents=True,exist_ok=True);ET.ElementTree(xml).write(self.preset_file(),encoding='utf-8',xml_declaration=True)
+        self.load_presets()
+
+    def load_preset(self):
+        i=self.preset_combo.currentIndex()
+        if i<0:return
+        vals=self.presets[i][1]
+        for name,widget in self.preference_widgets().items():
+            if name not in vals:continue
+            try:value=json.loads(vals[name])
+            except (TypeError,ValueError):value=vals[name]
+            if isinstance(widget,QCheckBox):widget.setChecked(value in (True,'true','True'))
+            elif isinstance(widget,QComboBox):
+                idx=widget.findData(value)
+                if idx>=0:widget.setCurrentIndex(idx)
+            elif isinstance(widget,TimeControl):widget.setValue(float(value))
+            elif isinstance(widget,QLineEdit):widget.setText(str(value))
+        self.watermark_text.setText(vals.get('watermark_text','@bemcorrido'))
+        try:self.watermark_values=json.loads(vals.get('watermark_values','{}'))
+        except ValueError:pass
+
     def schedule_preferences_save(self, *_):
         if not self.restoring_preferences:
             self.preferences_timer.start()
@@ -674,6 +783,8 @@ class Window(QMainWindow):
             else:
                 values[name] = widget.text()
         values['music_path'] = str(self.music_path) if self.music_path else ''
+        values['watermark_text'] = self.watermark_text.text()
+        values['watermark_values'] = self.watermark_values
         values['browse_directory'] = self.drop.browse_directory
         self.preferences.setValue('choices/v1', json.dumps(values, ensure_ascii=False))
         self.preferences.setValue('window/geometry', self.saveGeometry())
@@ -690,6 +801,8 @@ class Window(QMainWindow):
             values = {}
         if not isinstance(values, dict):
             values = {}
+        self.watermark_text.setText(values.get('watermark_text','@bemcorrido'))
+        if isinstance(values.get('watermark_values'),dict): self.watermark_values.update(values['watermark_values'])
         for name, widget in self.preference_widgets().items():
             if name not in values:
                 continue
@@ -899,7 +1012,13 @@ class Window(QMainWindow):
                               fast_duration=self.fast_time.value(), limit=limit,
                               keep_end=self.cut.currentData(), codec=self.codec.currentData(),
                               sq_detection=self.sq.isChecked(), sq_factor=self.sq_factor.currentData(),
-                              watermark=self.watermark.isChecked(), workers=self.workers.currentData(),
+                              watermark=self.watermark.isChecked(), watermark_text=self.watermark_text.text(),
+                              watermark_size=self.watermark_values['size'], watermark_opacity=self.watermark_values['opacity'],
+                              watermark_anchor=self.watermark_values['anchor'], watermark_x=self.watermark_values['x'],
+                              watermark_y=self.watermark_values['y'], watermark_font=self.watermark_values['font'],
+                              watermark_bold=self.watermark_values['bold'], watermark_italic=self.watermark_values['italic'],
+                              watermark_underline=self.watermark_values['underline'], watermark_shadow=self.watermark_values['shadow'],
+                              watermark_color=self.watermark_values['color'], workers=self.workers.currentData(),
                               ramp=self.ramp.isChecked(), ramp_duration=self.ramp_time.value(),
                               slow_duration=self.slow_time.value(), repetitions=self.repetitions.currentData(),
                               adaptive_fps=self.fluency.currentData())
