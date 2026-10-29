@@ -102,6 +102,18 @@ class Options:
     sq_detection: bool = True
     sq_factor: float = 10.0
     watermark: bool = True
+    watermark_text: str = '@bemcorrido'
+    watermark_size: int = 36
+    watermark_opacity: float = 0.5
+    watermark_anchor: str = 'br'
+    watermark_x: int = 20
+    watermark_y: int = 20
+    watermark_color: str = 'white'
+    watermark_font: str = 'Arial'
+    watermark_bold: bool = False
+    watermark_italic: bool = False
+    watermark_underline: bool = False
+    watermark_shadow: bool = False
     workers: int = 2
     ramp: bool = False
     ramp_duration: float = 1.0
@@ -328,9 +340,26 @@ def filter_graph(plan, options, source_fps=24.0):
         # Quadro 0 intacto para miniatura. Quadro 1 inicia o fade do preto.
         tail += f",fade=t=in:st={1 / 24:.9f}:d={options.fade}:enable='gte(n,1)'"
     if options.watermark:
-        font = next((p for p in ('/Library/Fonts/Arial.ttf', '/System/Library/Fonts/Supplemental/Arial.ttf') if Path(p).is_file()), None)
+        fontfiles = {'Arial': 'Arial.ttf', 'Helvetica': 'Arial.ttf', 'Verdana': 'Verdana.ttf',
+                     'Georgia': 'Georgia.ttf', 'Courier New': 'Courier New.ttf'}
+        fname = fontfiles.get(options.watermark_font, 'Arial.ttf')
+        if options.watermark_bold and options.watermark_italic: fname = fname.replace('.ttf', ' Bold Italic.ttf')
+        elif options.watermark_bold: fname = fname.replace('.ttf', ' Bold.ttf')
+        elif options.watermark_italic: fname = fname.replace('.ttf', ' Italic.ttf')
+        candidates = (f'/Library/Fonts/{fname}', f'/System/Library/Fonts/Supplemental/{fname}')
+        font = next((p for p in candidates if Path(p).is_file()), None)
         font_arg = f"fontfile='{font}':" if font else ''
-        tail += f",drawtext={font_arg}text='@bemcorrido':fontcolor=white@0.5:fontsize=36:x=w-text_w-20:y=h-text_h-20"
+        anchors = {'tl': ('0', '0'), 'tc': ('(w-text_w)/2', '0'), 'tr': ('w-text_w', '0'),
+                   'ml': ('0', '(h-text_h)/2'), 'mc': ('(w-text_w)/2', '(h-text_h)/2'),
+                   'mr': ('w-text_w', '(h-text_h)/2'), 'bl': ('0', 'h-text_h'),
+                   'bc': ('(w-text_w)/2', 'h-text_h'), 'br': ('w-text_w', 'h-text_h')}
+        x, y = anchors.get(options.watermark_anchor, anchors['br'])
+        x = f'({x})+{options.watermark_x}' if options.watermark_anchor.endswith('l') or options.watermark_anchor.endswith('c') else f'({x})-{options.watermark_x}'
+        y = f'({y})+{options.watermark_y}' if options.watermark_anchor.startswith('t') or options.watermark_anchor.startswith('m') else f'({y})-{options.watermark_y}'
+        text = options.watermark_text.replace('\\', '\\\\').replace(':', '\\:').replace("'", "\\\\'").replace('%', '\\%')
+        tail += f",drawtext={font_arg}text='{text}':fontcolor={options.watermark_color}@{options.watermark_opacity}:fontsize={options.watermark_size}:x={x}:y={y}:expansion=none"
+        if options.watermark_underline: tail += ':underline=1'
+        if options.watermark_shadow: tail += ':shadowcolor=black@0.7:shadowx=2:shadowy=2'
     if options.fade_out_video:
         length = plan_duration(plan)
         fade_length = min(options.fade_out_video_duration, length)
