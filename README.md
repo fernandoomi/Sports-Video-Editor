@@ -2,6 +2,14 @@
 
 Projeto open source sob a licença MIT. Consulte [LICENSE](LICENSE) para os termos.
 
+## Abas e presets
+
+A interface está organizada nas abas **01 Entrada**, **02 Edição** e **03 Exportação**. Na aba Exportação, é possível salvar até cinco presets. Eles ficam em `~/Documents/Sports Video Editor Presets.xml` e podem ser transferidos entre computadores.
+
+## Marca-d’água
+
+O texto da marca-d’água é editável. Em **Avançado**, ajuste tamanho, transparência, ponto de ancoragem, deslocamentos horizontal e vertical, fonte, negrito, itálico, sublinhado, sombra e uma das oito cores. As opções são aplicadas ao filtro de texto do FFmpeg.
+
 Aplicativo Python/Qt para macOS, com velocidade automática baseada no script `00 Editor s corte - 00 Final.py` fornecido em 28/10/2026. Organizado em entrada, edição, saída e logs. Não depende de servidor ou navegador.
 
 Janela ampla de 1340 × 740, com todas as seções visíveis sem rolagem da janela. A área de arrastar arquivos fica à esquerda, com a lista abaixo, e as opções de edição à direita; as duas barras de progresso têm 4 pixels de altura e ficam agrupadas. Apenas as listas de arquivos e logs têm rolagem interna quando necessário.
