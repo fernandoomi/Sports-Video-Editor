@@ -1,4 +1,4 @@
-# Editor Visual · 3.9.0
+# Editor Visual · 3.10.0
 
 Projeto open source sob a licença MIT. Consulte [LICENSE](LICENSE) para os termos.
 
@@ -8,7 +8,7 @@ A interface está organizada nas abas **01 Entrada**, **02 Edição** e **03 Exp
 
 ## Marca-d’água
 
-O texto da marca-d’água é editável. Em **Avançado**, ajuste tamanho, transparência, ponto de ancoragem, deslocamentos horizontal e vertical, fonte, negrito, itálico, sublinhado, sombra e uma das oito cores. As opções são aplicadas ao filtro de texto do FFmpeg.
+O texto da marca-d’água é editável. Em **Avançado**, ajuste tamanho, transparência, ponto de ancoragem, deslocamentos horizontal e vertical, fonte, negrito, itálico, sublinhado e uma das oito cores. O sublinhado é gravado com o renderizador libass do FFmpeg.
 
 Aplicativo Python/Qt para macOS, com velocidade automática baseada no script `00 Editor s corte - 00 Final.py` fornecido em 28/10/2026. Organizado em entrada, edição, saída e logs. Não depende de servidor ou navegador.
 
@@ -70,7 +70,7 @@ Os modos de 120 e 240 fps exigem mais do codificador e do reprodutor. O bitrate 
 
 ## Início e conclusão
 
-Ao clicar em **▶️ Iniciar edição**, o editor valida as opções e consulta os conflitos no destino. Depois exibe **Iniciando...** por 2 segundos antes de processar, sem travar a janela. Você pode cancelar durante essa espera.
+Ao clicar em **▶️ Iniciar edição**, o editor valida as opções e consulta os conflitos no destino. Depois de confirmar os conflitos, o processamento começa imediatamente.
 
 Na seção **03 Saída**, escolha **Ao terminar → Abrir a pasta destino** ou **Abrir um pop-up** (padrão). O pop-up informa quantos vídeos foram concluídos, pulados e falharam. A ação é executada depois de encerrar o lote e liberar os controles, inclusive quando todos os arquivos foram pulados. Lotes cancelados não disparam a ação de conclusão.
 
@@ -102,7 +102,7 @@ Selecione um vídeo na **Fila de edição** para carregá-lo no painel de pré-v
 - Até dois vídeos em paralelo por padrão, configurável de um a quatro. Sem interpolação de quadros. Música adicionada em uma segunda etapa, copiando o vídeo sem recodificar e usando sua duração real.
 - Detecção robusta pela maior taxa entre `r_frame_rate` e `avg_frame_rate`. O modo automático usa a mesma lógica do novo script: para FPS acima de 24, multiplica o tempo por FPS/24, arredondando taxas próximas de padrões (239,76 → 240, por exemplo). Até 24 fps, preserva a duração. Exemplo: 2 segundos a 240 fps resultam em cerca de 20 segundos, sem rampa.
 - O antigo perfil fixo de fases foi substituído. A hipótese Sony S&Q fica **marcada por padrão** para vídeos próximos de 24 fps. O editor preserva o slow já gravado e usa o fator escolhido para restaurar movimento normal nas rampas; desmarque para arquivos comuns de 24 fps. Como metadados de 24 fps não identificam de forma confiável S&Q, confirme o fator de captura no seletor.
-- Marca-d’água `@bemcorrido` habilitada por padrão, podendo ser desmarcada. Requer FFmpeg com filtro `drawtext`.
+- Marca-d’água `@bemcorrido` habilitada por padrão, podendo ser desmarcada. Requer FFmpeg com os filtros `drawtext` e `subtitles` (libass) para aplicar o sublinhado.
 - Nomes sem espaços, hífens ou underscores, em maiúsculas, com sufixo `ED01`. Colisões recebem `_2`, `_3` etc. Antes de iniciar, o editor verifica os nomes finais na pasta destino e pergunta se deseja **Sobrescrever** ou **Pular**, com **Aplicar a todos os conflitos deste lote**. A opção **Cancelar lote** interrompe a preparação. A sobrescrita só substitui o arquivo antigo após a nova exportação terminar com sucesso. Os sufixos `_2`, `_3` distinguem entradas da própria fila que geram o mesmo nome; os nomes são estáveis ao repetir o lote.
 
 A versão visual define explicitamente bitrate de vídeo de 12 Mb/s: o script original deixava a escolha para o padrão do codificador. O tamanho final depende da duração, conteúdo e codificador.
@@ -121,6 +121,8 @@ Arquitetura: [interface](editor.py), [motor](engine.py), [testes](test_engine.py
 ## Histórico
 
 **3.9.0 · 28/10/2026:** sliders com campos numéricos para tempos de fade e velocidade, com ajuste em décimos e compatibilidade com preferências anteriores.
+
+**3.10.0 · 30/10/2026:** sublinhado real na exportação via libass, setas consistentes nos campos numéricos e início imediato do lote, sem espera inicial.
 
 **3.8.0 · 28/10/2026:** controle do tempo rápido antes de cada rampa e opções de velocidade lenta 0,75× e rápida 0,8×.
 

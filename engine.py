@@ -113,7 +113,6 @@ class Options:
     watermark_bold: bool = False
     watermark_italic: bool = False
     watermark_underline: bool = False
-    watermark_shadow: bool = False
     workers: int = 2
     ramp: bool = False
     ramp_duration: float = 1.0
@@ -311,7 +310,7 @@ def segment_fps(factor, source_fps, options):
     return max(24.0, min(options.adaptive_fps, (source_fps or 24) * fastest))
 
 
-def filter_graph(plan, options, source_fps=24.0):
+def filter_graph(plan, options, source_fps=24.0, watermark_ass_path=None):
     filters, labels = [], []
     # Split explícito para reutilizar a entrada em múltiplos trechos.
     if len(plan) > 1:
@@ -340,26 +339,34 @@ def filter_graph(plan, options, source_fps=24.0):
         # Quadro 0 intacto para miniatura. Quadro 1 inicia o fade do preto.
         tail += f",fade=t=in:st={1 / 24:.9f}:d={options.fade}:enable='gte(n,1)'"
     if options.watermark:
-        fontfiles = {'Arial': 'Arial.ttf', 'Helvetica': 'Arial.ttf', 'Verdana': 'Verdana.ttf',
-                     'Georgia': 'Georgia.ttf', 'Courier New': 'Courier New.ttf'}
-        fname = fontfiles.get(options.watermark_font, 'Arial.ttf')
-        if options.watermark_bold and options.watermark_italic: fname = fname.replace('.ttf', ' Bold Italic.ttf')
-        elif options.watermark_bold: fname = fname.replace('.ttf', ' Bold.ttf')
-        elif options.watermark_italic: fname = fname.replace('.ttf', ' Italic.ttf')
-        candidates = (f'/Library/Fonts/{fname}', f'/System/Library/Fonts/Supplemental/{fname}')
-        font = next((p for p in candidates if Path(p).is_file()), None)
-        font_arg = f"fontfile='{font}':" if font else ''
-        anchors = {'tl': ('0', '0'), 'tc': ('(w-text_w)/2', '0'), 'tr': ('w-text_w', '0'),
-                   'ml': ('0', '(h-text_h)/2'), 'mc': ('(w-text_w)/2', '(h-text_h)/2'),
-                   'mr': ('w-text_w', '(h-text_h)/2'), 'bl': ('0', 'h-text_h'),
-                   'bc': ('(w-text_w)/2', 'h-text_h'), 'br': ('w-text_w', 'h-text_h')}
-        x, y = anchors.get(options.watermark_anchor, anchors['br'])
-        x = f'({x})+{options.watermark_x}' if options.watermark_anchor.endswith('l') or options.watermark_anchor.endswith('c') else f'({x})-{options.watermark_x}'
-        y = f'({y})+{options.watermark_y}' if options.watermark_anchor.startswith('t') or options.watermark_anchor.startswith('m') else f'({y})-{options.watermark_y}'
-        text = options.watermark_text.replace('\\', '\\\\').replace(':', '\\:').replace("'", "\\\\'").replace('%', '\\%')
-        tail += f",drawtext={font_arg}text='{text}':fontcolor={options.watermark_color}@{options.watermark_opacity}:fontsize={options.watermark_size}:x={x}:y={y}:expansion=none"
-        if options.watermark_underline: tail += ':underline=1'
-        if options.watermark_shadow: tail += ':shadowcolor=black@0.7:shadowx=2:shadowy=2'
+        def escape_filter_value(value):
+            return (str(value).replace('\\', r'\\')
+                    .replace(':', r'\:')
+                    .replace("'", r"\'")
+                    .replace(',', r'\,'))
+        if options.watermark_underline and watermark_ass_path:
+            # Libass aplica sublinhado tipográfico real; drawtext não oferece
+            # underline em todos os builds do FFmpeg.
+            tail += f",subtitles=filename='{escape_filter_value(watermark_ass_path)}':charenc=UTF-8"
+        else:
+            fontfiles = {'Arial': 'Arial.ttf', 'Helvetica': 'Arial.ttf', 'Verdana': 'Verdana.ttf',
+                         'Georgia': 'Georgia.ttf', 'Courier New': 'Courier New.ttf'}
+            fname = fontfiles.get(options.watermark_font, 'Arial.ttf')
+            if options.watermark_bold and options.watermark_italic: fname = fname.replace('.ttf', ' Bold Italic.ttf')
+            elif options.watermark_bold: fname = fname.replace('.ttf', ' Bold.ttf')
+            elif options.watermark_italic: fname = fname.replace('.ttf', ' Italic.ttf')
+            candidates = (f'/Library/Fonts/{fname}', f'/System/Library/Fonts/Supplemental/{fname}')
+            font = next((p for p in candidates if Path(p).is_file()), None)
+            font_arg = f"fontfile='{escape_filter_value(font)}':" if font else ''
+            anchors = {'tl': ('0', '0'), 'tc': ('(w-text_w)/2', '0'), 'tr': ('w-text_w', '0'),
+                       'ml': ('0', '(h-text_h)/2'), 'mc': ('(w-text_w)/2', '(h-text_h)/2'),
+                       'mr': ('w-text_w', '(h-text_h)/2'), 'bl': ('0', 'h-text_h'),
+                       'bc': ('(w-text_w)/2', 'h-text_h'), 'br': ('w-text_w', 'h-text_h')}
+            x, y = anchors.get(options.watermark_anchor, anchors['br'])
+            x = f'({x})+{options.watermark_x}' if options.watermark_anchor.endswith('l') or options.watermark_anchor.endswith('c') else f'({x})-{options.watermark_x}'
+            y = f'({y})+{options.watermark_y}' if options.watermark_anchor.startswith('t') or options.watermark_anchor.startswith('m') else f'({y})-{options.watermark_y}'
+            text = escape_filter_value(options.watermark_text).replace('%', r'\%')
+            tail += f",drawtext={font_arg}text='{text}':fontcolor={options.watermark_color}@{options.watermark_opacity}:fontsize={options.watermark_size}:x={x}:y={y}:expansion=none"
     if options.fade_out_video:
         length = plan_duration(plan)
         fade_length = min(options.fade_out_video_duration, length)
@@ -427,6 +434,43 @@ def run_ffmpeg(arguments, duration, stop, progress):
             process.stdout.close()
 
 
+def watermark_ass_script(options, width, height):
+    """Gera um overlay ASS com sublinhado real e coordenadas no tamanho do vídeo."""
+    rgb = {
+        'white': (255, 255, 255), 'black': (0, 0, 0), 'red': (255, 0, 0),
+        'lime': (0, 255, 0), 'blue': (0, 0, 255), 'yellow': (255, 255, 0),
+        'cyan': (0, 255, 255), 'magenta': (255, 0, 255),
+    }.get(options.watermark_color, (255, 255, 255))
+    alpha = round((1 - max(0.0, min(1.0, options.watermark_opacity))) * 255)
+    primary = f'&H{alpha:02X}{rgb[2]:02X}{rgb[1]:02X}{rgb[0]:02X}'
+    anchors = {'tl': (7, 0, 0), 'tc': (8, width / 2, 0), 'tr': (9, width, 0),
+               'ml': (4, 0, height / 2), 'mc': (5, width / 2, height / 2),
+               'mr': (6, width, height / 2), 'bl': (1, 0, height),
+               'bc': (2, width / 2, height), 'br': (3, width, height)}
+    alignment, anchor_x, anchor_y = anchors.get(options.watermark_anchor, anchors['br'])
+    x = anchor_x + options.watermark_x if alignment in (7, 4, 1) else anchor_x - options.watermark_x if alignment in (9, 6, 3) else anchor_x + options.watermark_x
+    y = anchor_y + options.watermark_y if alignment in (7, 8, 9, 4, 5, 6) else anchor_y - options.watermark_y
+    text = (options.watermark_text.replace('\\', r'\\').replace('{', r'\{')
+            .replace('}', r'\}').replace('\r\n', '\n').replace('\n', r'\N'))
+    bold, italic = (-1 if options.watermark_bold else 0), (-1 if options.watermark_italic else 0)
+    font = options.watermark_font.replace(',', '')
+    return f'''[Script Info]
+ScriptType: v4.00+
+PlayResX: {width}
+PlayResY: {height}
+WrapStyle: 2
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Watermark,{font},{options.watermark_size},{primary},{primary},&HFF000000,&HFF000000,{bold},{italic},-1,0,100,100,0,0,1,0,0,{alignment},0,0,0,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:00.00,99:59:59.99,Watermark,,0,0,0,,{{\\pos({x:.2f},{y:.2f})}}{text}
+'''
+
+
 def process_video(source, target, options, stop, progress, log, overwrite=False):
     checkpoint(stop)
     duration, fps = metadata(source, stop)
@@ -442,7 +486,16 @@ def process_video(source, target, options, stop, progress, log, overwrite=False)
         log('Fluidez adaptativa · taxas por trecho: ' + ', '.join(f'{rate:g} fps' for rate in rates))
     with tempfile.TemporaryDirectory(prefix='.editor-', dir=options.output) as work:
         video, mux = Path(work) / 'video.mp4', Path(work) / 'final.mp4'
-        args = ['-i', str(source), '-filter_complex', filter_graph(plan, options, fps),
+        watermark_ass_path = None
+        if options.watermark and options.watermark_underline:
+            info = probe(source, stop)
+            stream = next((item for item in info.get('streams', []) if item.get('codec_type') == 'video'), {})
+            width, height = int(stream.get('width') or 0), int(stream.get('height') or 0)
+            if width <= 0 or height <= 0:
+                raise RuntimeError('Não foi possível ler as dimensões do vídeo para aplicar o sublinhado.')
+            watermark_ass_path = Path(work) / 'watermark.ass'
+            watermark_ass_path.write_text(watermark_ass_script(options, width, height), encoding='utf-8')
+        args = ['-i', str(source), '-filter_complex', filter_graph(plan, options, fps, watermark_ass_path),
                 '-map', '[vout]', '-an', '-c:v', f'{options.codec}_videotoolbox',
                 '-pix_fmt', 'yuv420p', '-b:v', '12M']
         if options.adaptive_fps is not None:
