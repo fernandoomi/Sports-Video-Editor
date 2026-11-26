@@ -113,6 +113,10 @@ class Options:
     watermark_bold: bool = False
     watermark_italic: bool = False
     watermark_underline: bool = False
+    rotation: int = 0  # Rotação adicional em graus, aplicada após a orientação automática.
+    zoom: float = 1.0  # Ampliação central por vídeo.
+    trim_start: float = 0.0
+    trim_end: float | None = None
     workers: int = 2
     ramp: bool = False
     ramp_duration: float = 1.0
@@ -335,6 +339,17 @@ def filter_graph(plan, options, source_fps=24.0, watermark_ass_path=None):
     tail = ''.join(labels) + f'concat=n={len(plan)}:v=1:a=0,setpts=PTS-STARTPTS'
     if options.adaptive_fps is None:
         tail += ',fps=24'
+    rotation = int(options.rotation) % 360
+    if rotation == 90:
+        tail += ',transpose=clock'
+    elif rotation == 180:
+        tail += ',hflip,vflip'
+    elif rotation == 270:
+        tail += ',transpose=cclock'
+    if options.zoom > 1.0:
+        factor = float(options.zoom)
+        tail += (f',crop=iw/{factor:.4f}:ih/{factor:.4f}:(iw-ow)/2:(ih-oh)/2,'
+                 f'scale=ceil(iw*{factor:.4f}/2)*2:ceil(ih*{factor:.4f}/2)*2')
     if options.fade is not None:
         # Quadro 0 intacto para miniatura. Quadro 1 inicia o fade do preto.
         tail += f",fade=t=in:st={1 / 24:.9f}:d={options.fade}:enable='gte(n,1)'"
@@ -474,7 +489,12 @@ Dialogue: 0,0:00:00.00,99:59:59.99,Watermark,,0,0,0,,{{\\pos({x:.2f},{y:.2f})}}{
 def process_video(source, target, options, stop, progress, log, overwrite=False):
     checkpoint(stop)
     duration, fps = metadata(source, stop)
-    plan = crop_plan(speed_plan(duration, fps, options), options.limit, options.keep_end)
+    trim_start = max(0.0, min(duration, float(options.trim_start or 0.0)))
+    trim_end = duration if options.trim_end is None else max(trim_start, min(duration, float(options.trim_end)))
+    trim_duration = max(0.001, trim_end - trim_start)
+    plan = speed_plan(trim_duration, fps, options)
+    plan = [(trim_start + start, length, factor) for start, length, factor in plan]
+    plan = crop_plan(plan, options.limit, options.keep_end)
     expected = plan_duration(plan)
     log(f'{source.name}: {fps:.3f} fps · {duration:.2f}s → cerca de {expected:.2f}s')
     if options.sq_detection and fps > 0 and abs(fps - 24) < 1:
@@ -493,6 +513,8 @@ def process_video(source, target, options, stop, progress, log, overwrite=False)
             width, height = int(stream.get('width') or 0), int(stream.get('height') or 0)
             if width <= 0 or height <= 0:
                 raise RuntimeError('Não foi possível ler as dimensões do vídeo para aplicar o sublinhado.')
+            if int(options.rotation) % 180:
+                width, height = height, width
             watermark_ass_path = Path(work) / 'watermark.ass'
             watermark_ass_path.write_text(watermark_ass_script(options, width, height), encoding='utf-8')
         args = ['-i', str(source), '-filter_complex', filter_graph(plan, options, fps, watermark_ass_path),

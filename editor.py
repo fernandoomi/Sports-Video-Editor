@@ -1,23 +1,24 @@
-"""Editor Visual 3.10.0 — aplicativo Qt para macOS."""
+"""Editor Visual 3.28.0 — aplicativo Qt para macOS."""
 from __future__ import annotations
 
 import math
 import json
 import os
+import subprocess
 import threading
 import sys
 import time
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QSettings, QThread, QTimer, Signal, Qt, QUrl, QRegularExpression, QEvent
-from PySide6.QtGui import QDesktopServices, QRegularExpressionValidator, QValidator
-from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+from PySide6.QtCore import QObject, QSettings, QThread, QTimer, Signal, Qt, QUrl, QRegularExpression, QEvent, QRunnable, QThreadPool, QRectF, QSize
+from PySide6.QtGui import QDesktopServices, QRegularExpressionValidator, QValidator, QImage, QPixmap, QFontMetrics, QPainter, QTransform, QColor, QIcon
+from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFrame, QGridLayout, QStackedLayout, QTabWidget, QSpinBox,
+    QApplication, QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFrame, QGridLayout, QStackedLayout, QTabWidget, QSpinBox, QScrollArea, QToolButton,
     QHBoxLayout, QLabel, QLineEdit, QListWidget, QMainWindow, QMessageBox,
     QPlainTextEdit, QProgressBar, QPushButton, QSizePolicy, QSlider, QVBoxLayout, QWidget,
 )
@@ -143,6 +144,486 @@ class PlaybackDialog(QDialog):
         super().keyPressEvent(event)
 
 
+class PlaybackVideoView(QWidget):
+    doubleClicked = Signal()
+
+    def __init__(self):
+        super().__init__()
+        self.frame_image = QImage()
+        self.frame_rotation = 0
+        self.rotation = 0
+        self.zoom = 1.0
+        self.setStyleSheet('background: black;')
+
+    def set_frame(self, frame):
+        image = frame.toImage() if frame.isValid() else QImage()
+        self.frame_image = image.copy() if not image.isNull() else QImage()
+        self.frame_rotation = frame.rotationAngle().value if frame.isValid() else 0
+        self.update()
+
+    def set_rotation(self, angle):
+        self.rotation = angle % 360
+        self.update()
+
+    def set_zoom(self, zoom):
+        self.zoom = max(1.0, float(zoom))
+        self.update()
+
+    def mouseDoubleClickEvent(self, event):
+        self.doubleClicked.emit()
+        event.accept()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), Qt.black)
+        image = self.frame_image
+        if image.isNull():
+            return
+        angle = (self.rotation + self.frame_rotation) % 360
+        rotated = angle % 180 != 0
+        display_w = image.height() if rotated else image.width()
+        display_h = image.width() if rotated else image.height()
+        scale = min(self.width() / display_w, self.height() / display_h) * self.zoom
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        painter.translate(self.width() / 2, self.height() / 2)
+        painter.rotate(angle)
+        painter.scale(scale, scale)
+        painter.drawImage(QRectF(-image.width() / 2, -image.height() / 2,
+                                image.width(), image.height()), image)
+
+
+class ThumbnailSignals(QObject):
+    ready = Signal(str, float, int, bytes, float)
+
+
+class ThumbnailSheetSignals(QObject):
+    ready = Signal(str, int, bytes)
+
+
+class ThumbnailJob(QRunnable):
+    def __init__(self, path, seconds, rotation, initial=False):
+        super().__init__()
+        self.path, self.seconds, self.rotation, self.initial = str(path), float(seconds), int(rotation) % 360, initial
+        self.signals = ThumbnailSignals()
+
+    def run(self):
+        duration = 0.0
+        try:
+            if self.initial:
+                info = probe(self.path)
+                stream = next(s for s in info['streams'] if s.get('codec_type') == 'video')
+                duration = float(info.get('format', {}).get('duration') or stream.get('duration') or 0)
+            filters = ['scale=480:360:force_original_aspect_ratio=decrease', 'pad=480:360:(ow-iw)/2:(oh-ih)/2']
+            filters += {90: ['transpose=clock'], 180: ['hflip', 'vflip'], 270: ['transpose=cclock']}.get(self.rotation, [])
+            result = subprocess.run([binary('ffmpeg'), '-v', 'error', '-ss', str(max(0, self.seconds)),
+                                     '-i', self.path, '-frames:v', '1', '-vf', ','.join(filters),
+                                     '-f', 'image2pipe', '-vcodec', 'png', '-'],
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=25)
+            if result.returncode == 0 and result.stdout:
+                self.signals.ready.emit(self.path, self.seconds, self.rotation, result.stdout, duration)
+        except Exception:
+            pass
+
+
+class ThumbnailSheetJob(QRunnable):
+    """Cria uma folha de quadros do original para percorrer sem reabrir o vídeo."""
+
+    def __init__(self, path, duration, rotation):
+        super().__init__()
+        self.path, self.duration, self.rotation = str(path), float(duration), int(rotation) % 360
+        self.signals = ThumbnailSheetSignals()
+
+    def run(self):
+        data = b''
+        try:
+            count, columns, rows, cell_w, cell_h = 48, 8, 6, 120, 90
+            filters = [f'fps={count / self.duration:.10f}']
+            filters += {90: ['transpose=clock'], 180: ['hflip', 'vflip'], 270: ['transpose=cclock']}.get(self.rotation, [])
+            filters += [f'scale={cell_w}:{cell_h}:force_original_aspect_ratio=decrease',
+                        f'pad={cell_w}:{cell_h}:(ow-iw)/2:(oh-ih)/2',
+                        f'tile=layout={columns}x{rows}:nb_frames={count}:padding=0:margin=0']
+            result = subprocess.run([binary('ffmpeg'), '-v', 'error', '-i', self.path,
+                                     '-vf', ','.join(filters), '-frames:v', '1', '-an',
+                                     '-f', 'image2pipe', '-vcodec', 'png', '-'],
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=90)
+            if result.returncode == 0:
+                data = result.stdout
+        except Exception:
+            pass
+        self.signals.ready.emit(self.path, self.rotation, data)
+
+
+class HoverTimeline(QSlider):
+    hoverPosition = Signal(float)
+
+    def __init__(self, parent=None):
+        super().__init__(Qt.Horizontal, parent)
+        self.setMouseTracking(True)
+        self.duration = 0.0
+        self.current_seconds = 0.0
+        self.setRange(0, 1000)
+        self.setFixedHeight(14)
+        self.setToolTip('Passe o cursor pela linha do tempo para percorrer o vídeo.')
+
+    def mouseMoveEvent(self, event):
+        if self.duration > 0 and self.width() > 0:
+            ratio = max(0.0, min(1.0, event.position().x() / self.width()))
+            value = round(ratio * self.maximum())
+            self.setValue(value)
+            self.hoverPosition.emit(ratio * self.duration)
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event):
+        super().leaveEvent(event)
+
+
+class TrimFilmstrip(QWidget):
+    rangeChanged = Signal(float, float)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.frames = []
+        self.duration = 0.0
+        self.start = 0.0
+        self.end = 0.0
+        self.dragging = None
+        self.setMinimumHeight(90)
+        self.setMouseTracking(True)
+
+    def set_frames(self, frames, duration):
+        self.frames = frames
+        self.duration = max(0.0, duration)
+        self.update()
+
+    def set_range(self, start, end):
+        self.start, self.end = start, end
+        self.update()
+
+    def _time_at(self, x):
+        return max(0.0, min(1.0, x / max(1, self.width()))) * self.duration
+
+    def mousePressEvent(self, event):
+        if self.duration <= 0:
+            return
+        t = self._time_at(event.position().x())
+        self.dragging = 'start' if abs(t-self.start) <= abs(t-self.end) else 'end'
+        self._move_handle(event.position().x())
+
+    def mouseMoveEvent(self, event):
+        if self.dragging:
+            self._move_handle(event.position().x())
+
+    def mouseReleaseEvent(self, event):
+        self.dragging = None
+
+    def _move_handle(self, x):
+        t = self._time_at(x)
+        if self.dragging == 'start':
+            self.start = min(t, max(0.0, self.end - .05))
+        else:
+            self.end = max(t, min(self.duration, self.start + .05))
+        self.rangeChanged.emit(self.start, self.end)
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), Qt.black)
+        if self.frames:
+            gap = 7
+            cell_w = (self.width() - gap * (len(self.frames)-1)) / len(self.frames)
+            for i, frame in enumerate(self.frames):
+                rect = QRectF(i*(cell_w+gap), 0, cell_w, self.height())
+                target_ratio = rect.width() / max(1, rect.height())
+                source_ratio = frame.width() / max(1, frame.height())
+                if source_ratio > target_ratio:
+                    crop_w = round(frame.height() * target_ratio)
+                    source = QRectF((frame.width()-crop_w)/2, 0, crop_w, frame.height())
+                else:
+                    crop_h = round(frame.width() / target_ratio)
+                    source = QRectF(0, (frame.height()-crop_h)/2, frame.width(), crop_h)
+                painter.drawImage(rect, frame, source)
+        if self.duration <= 0:
+            return
+        x1 = self.start / self.duration * self.width()
+        x2 = self.end / self.duration * self.width()
+        painter.fillRect(QRectF(0, 0, x1, self.height()), Qt.black)
+        painter.fillRect(QRectF(x2, 0, self.width()-x2, self.height()), Qt.black)
+        painter.fillRect(QRectF(x1, 0, max(0, x2-x1), 3), Qt.blue)
+        painter.fillRect(QRectF(x1-5, 0, 10, self.height()), QColor(50, 130, 255, 220))
+        painter.fillRect(QRectF(x2-5, 0, 10, self.height()), QColor(50, 130, 255, 220))
+
+
+class ThumbnailCard(QFrame):
+    selected = Signal(str)
+    doubleClicked = Signal()
+    playRequested = Signal(str, bool)
+    requestFrame = Signal(str, float, int)
+    selectionChanged = Signal(str, bool)
+
+    def __init__(self, path, rotation=0, selection_mode=False, checked=False, parent=None, zoom=1.0):
+        super().__init__(parent)
+        self.path = str(path)
+        self.rotation = rotation % 360
+        self.zoom = zoom
+        self.source_image = QImage()
+        self.live_frame = False
+        self.live_frame_rotation = 0
+        self.video_sink = QVideoSink(self)
+        self.video_sink.videoFrameChanged.connect(self.show_live_frame)
+        self.duration = 0.0
+        self.pending = None
+        self.busy = False
+        self.frames = []
+        self.sheet_requested = False
+        self.active = False
+        self.setObjectName('thumbnailCard')
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(7, 7, 7, 6)
+        layout.setSpacing(2)
+        self.preview = QLabel('Carregando miniatura…')
+        self.preview.setAlignment(Qt.AlignCenter)
+        self.preview.setFixedHeight(146)
+        self.preview.setStyleSheet('background:#090d14;border-radius:5px;')
+        self.preview_stack = QWidget()
+        self.preview_stack.setFixedHeight(146)
+        stack = QStackedLayout(self.preview_stack)
+        stack.setContentsMargins(0, 0, 0, 0)
+        stack.setStackingMode(QStackedLayout.StackAll)
+        stack.addWidget(self.preview)
+        self.rotation_mark = QLabel('↻')
+        self.rotation_mark.setObjectName('rotationMark')
+        self.rotation_mark.setFixedSize(23, 22)
+        self.rotation_mark.setAlignment(Qt.AlignCenter)
+        self.rotation_mark.hide()
+        self.rotation_mark.setToolTip('Vídeo girado')
+        self.zoom_mark = QLabel('⌕')
+        self.zoom_mark.setObjectName('rotationMark')
+        self.zoom_mark.setFixedSize(23, 22)
+        self.zoom_mark.setAlignment(Qt.AlignCenter)
+        self.zoom_mark.hide()
+        self.zoom_mark.setToolTip('Zoom aplicado')
+        overlay = QWidget()
+        overlay.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        overlay_layout = QVBoxLayout(overlay)
+        overlay_layout.setContentsMargins(7, 0, 7, 7)
+        overlay_layout.setAlignment(Qt.AlignBottom)
+        overlay_layout.addStretch()
+        marker_row = QHBoxLayout()
+        marker_row.setAlignment(Qt.AlignLeft | Qt.AlignBottom)
+        marker_row.addWidget(self.rotation_mark)
+        marker_row.addWidget(self.zoom_mark)
+        self.play_button = QPushButton('▶')
+        self.play_button.setObjectName('thumbnailPlaybackButton')
+        self.play_button.setFixedSize(32, 28)
+        self.play_button.setToolTip('Reproduzir vídeo')
+        self.play_button.clicked.connect(lambda: self.playRequested.emit(self.path, False))
+        self.fullscreen_button = QPushButton('⛶')
+        self.fullscreen_button.setObjectName('thumbnailPlaybackButton')
+        self.fullscreen_button.setFixedSize(32, 28)
+        self.fullscreen_button.setToolTip('Abrir em tela cheia')
+        self.fullscreen_button.clicked.connect(lambda: self.playRequested.emit(self.path, True))
+        overlay_layout.addLayout(marker_row)
+        stack.addWidget(overlay)
+        overlay.raise_()
+        layout.addWidget(self.preview_stack)
+        self.preview.installEventFilter(self)
+        self.name = QLabel(Path(self.path).name)
+        self.name.setToolTip(self.path)
+        self.name.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.name.setWordWrap(False)
+        self.name.setFixedHeight(22)
+        name_row = QHBoxLayout()
+        name_row.setContentsMargins(0, 0, 0, 0)
+        name_row.addWidget(self.name, 1)
+        self.select_box = QCheckBox('Selecionar')
+        self.select_box.setToolTip('Inclui este vídeo na seleção para ações em lote.')
+        self.select_box.setChecked(checked)
+        self.select_box.setVisible(selection_mode)
+        self.select_box.toggled.connect(lambda state: self.selectionChanged.emit(self.path, state))
+        name_row.addWidget(self.select_box)
+        layout.addLayout(name_row)
+        self.timeline = HoverTimeline()
+        self.timeline.hoverPosition.connect(self.seek_hover)
+        timeline_row = QHBoxLayout()
+        timeline_row.setContentsMargins(0, 0, 0, 0)
+        timeline_row.setSpacing(5)
+        timeline_row.addWidget(self.play_button)
+        timeline_row.addWidget(self.timeline, 1)
+        timeline_row.addWidget(self.fullscreen_button)
+        layout.addLayout(timeline_row)
+        self.time_label = QLabel('Passe o cursor na linha do tempo')
+        self.time_label.setObjectName('muted')
+        self.time_label.setFixedHeight(16)
+        layout.addWidget(self.time_label)
+        self.timer = QTimer(self)
+        self.timer.setSingleShot(True)
+        self.timer.setInterval(110)
+        self.timer.timeout.connect(self.run_pending)
+        self.refresh_rotation(self.rotation)
+        self.set_zoom(self.zoom)
+        self.request(0.0)
+
+    def set_card_width(self, width):
+        # Área 4:3: dá mais espaço visual aos vídeos verticais sem esticar a imagem.
+        image_height = max(90, round((width - 14) * 3 / 4))
+        self.preview.setFixedHeight(image_height)
+        self.preview_stack.setFixedHeight(image_height)
+        self.setFixedWidth(width)
+        available_name_width = max(30, width - 120)
+        self.name.setText(QFontMetrics(self.name.font()).elidedText(
+            Path(self.path).name, Qt.ElideMiddle, available_name_width))
+        self.layout().activate()
+        self.setFixedHeight(self.layout().sizeHint().height())
+        self.show_image()
+
+    def set_zoom(self, zoom):
+        self.zoom = zoom
+        self.zoom_mark.setToolTip(f'Zoom de {round(zoom * 100)}% aplicado' if zoom > 1.0 else 'Zoom original')
+        self.zoom_mark.setVisible(zoom > 1.0)
+        self.show_image()
+
+    def show_live_frame(self, frame):
+        image = frame.toImage() if frame.isValid() else QImage()
+        if image.isNull():
+            return
+        self.source_image = image.copy()
+        self.live_frame = True
+        self.live_frame_rotation = frame.rotationAngle().value if frame.isValid() else 0
+        self.show_image()
+
+    def set_playing(self, playing):
+        self.play_button.setText('Ⅱ' if playing else '▶')
+        self.play_button.setToolTip('Pausar vídeo' if playing else 'Reproduzir vídeo')
+
+    def show_image(self):
+        if self.source_image.isNull() or self.preview.width() <= 0 or self.preview.height() <= 0:
+            return
+        image = self.source_image
+        if self.live_frame:
+            angle = (self.rotation + self.live_frame_rotation) % 360
+            if angle:
+                image = image.transformed(QTransform().rotate(angle), Qt.SmoothTransformation)
+        if self.zoom > 1.0:
+            width = max(1, round(image.width() / self.zoom))
+            height = max(1, round(image.height() / self.zoom))
+            image = image.copy((image.width() - width) // 2,
+                               (image.height() - height) // 2, width, height)
+        self.preview.setPixmap(QPixmap.fromImage(image).scaled(
+            self.preview.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+
+    def set_selection_mode(self, enabled):
+        self.select_box.setVisible(enabled)
+
+    def eventFilter(self, watched, event):
+        if watched is self.preview and event.type() == QEvent.MouseButtonPress:
+            self.selected.emit(self.path)
+            return True
+        if watched is self.preview and event.type() == QEvent.MouseButtonDblClick:
+            self.selected.emit(self.path)
+            self.doubleClicked.emit()
+            return True
+        return super().eventFilter(watched, event)
+
+    def refresh_rotation(self, degrees):
+        self.rotation = degrees % 360
+        self.rotation_mark.setVisible(self.rotation != 0)
+        self.rotation_mark.setText('↻' if self.rotation in (90, 180) else '↺')
+        self.rotation_mark.setToolTip(f'Rotação de {self.rotation}° aplicada' if self.rotation else 'Vídeo sem rotação')
+        self.frames.clear()
+        self.sheet_requested = False
+        self.preview.setText('Atualizando miniatura…')
+        self.preview.setPixmap(QPixmap())
+        self.source_image = QImage()
+        self.live_frame = False
+        self.pending = self.timeline.value() / max(1, self.timeline.maximum()) * self.duration if self.duration else 0
+        if self.active:
+            self.request(self.pending)
+
+    def seek_hover(self, seconds):
+        self.current_seconds = seconds
+        self.selected.emit(self.path)
+        self.time_label.setText(f'{seconds:.1f} s / {self.duration:.1f} s' if self.duration else 'Lendo duração…')
+        if self.frames:
+            self.show_timeline_frame(seconds)
+        else:
+            self.request(seconds)
+
+    def request(self, seconds):
+        self.pending = max(0.0, seconds)
+        self.current_seconds = self.pending
+        self.timer.start()
+
+    def run_pending(self):
+        if self.busy or self.pending is None:
+            return
+        seconds, self.pending = self.pending, None
+        if self.frames:
+            self.show_timeline_frame(seconds)
+            return
+        if self.duration > 0:
+            if not self.active:
+                self.pending = seconds
+                return
+            if not self.sheet_requested:
+                self.sheet_requested = True
+                job = ThumbnailSheetJob(self.path, self.duration, self.rotation)
+                job.signals.ready.connect(self.sheet_ready)
+                QThreadPool.globalInstance().start(job)
+            else:
+                self.pending = seconds
+            return
+        self.busy = True
+        job = ThumbnailJob(self.path, 0.0, self.rotation, initial=True)
+        job.signals.ready.connect(self.frame_ready)
+        QThreadPool.globalInstance().start(job)
+
+    def frame_ready(self, path, seconds, rotation, data, duration):
+        self.busy = False
+        if path != self.path or rotation != self.rotation:
+            self.run_pending()
+            return
+        if duration > 0 and not self.duration:
+            self.duration = duration
+            self.timeline.duration = duration
+            self.time_label.setText(f'0,0 s / {duration:.1f} s')
+        image = QImage.fromData(data)
+        if not image.isNull():
+            self.source_image = image
+            self.live_frame = False
+            self.show_image()
+        if self.pending is not None:
+            self.run_pending()
+        elif self.active and self.duration > 0 and not self.sheet_requested:
+            self.pending = self.timeline.value() / max(1, self.timeline.maximum()) * self.duration
+            self.run_pending()
+
+    def sheet_ready(self, path, rotation, data):
+        if path != self.path or rotation != self.rotation:
+            return
+        if not self.active:
+            self.sheet_requested = False
+            return
+        image = QImage.fromData(data)
+        if image.isNull():
+            self.sheet_requested = False
+            return
+        self.frames = [image.copy(col * 120, row * 90, 120, 90)
+                       for row in range(6) for col in range(8)]
+        if self.pending is not None:
+            self.run_pending()
+        else:
+            self.show_timeline_frame(self.current_seconds)
+
+    def show_timeline_frame(self, seconds):
+        if not self.frames or not self.duration:
+            return
+        ratio = max(0.0, min(1.0, seconds / self.duration))
+        index = round(ratio * (len(self.frames) - 1))
+        self.source_image = self.frames[index]
+        self.live_frame = False
+        self.show_image()
+
+
 class WatermarkDialog(QDialog):
     def __init__(self, values, text='@bemcorrido', parent=None):
         super().__init__(parent)
@@ -228,11 +709,14 @@ class Batch(QObject):
     log = Signal(str)
     complete = Signal(int, int, bool)
 
-    def __init__(self, files, options, jobs=None):
+    def __init__(self, files, options, jobs=None, rotations=None, zooms=None, trims=None):
         super().__init__()
         self.files, self.options = files, options
         self.stop = ProcessingControl()
         self.jobs = jobs
+        self.rotations = rotations or {}
+        self.zooms = zooms or {}
+        self.trims = trims or {}
 
     def run(self):
         success = failed = 0
@@ -254,7 +738,11 @@ class Batch(QObject):
                     self.progress.emit(index, 1)
             with ThreadPoolExecutor(max_workers=self.options.workers) as pool:
                 futures = {
-                    pool.submit(process_video, job.source, job.target, self.options, self.stop,
+                    pool.submit(process_video, job.source, job.target,
+                                replace(self.options, rotation=self.rotations.get(str(job.source), 0),
+                                        zoom=self.zooms.get(str(job.source), 1.0),
+                                        trim_start=self.trims.get(str(job.source), (0.0, None))[0],
+                                        trim_end=self.trims.get(str(job.source), (0.0, None))[1]), self.stop,
                                 lambda p, n=i: self.progress.emit(n, p), self.log.emit,
                                 overwrite=job.action == 'overwrite'): i
                     for i, job in enumerate(jobs) if job.action != 'skip'
@@ -332,6 +820,16 @@ class Window(QMainWindow):
         self.restoring_preferences = True
         self.preferences_error = False
         self.files = []
+        self.file_rotations = {}
+        self.file_zooms = {}
+        self.file_trims = {}
+        self.thumbnail_cards = {}
+        self.multi_select_mode = False
+        self.multi_selected = set()
+        self.zoom_select_mode = False
+        self.zoom_selected = set()
+        self.thumbnail_size = 260
+        QThreadPool.globalInstance().setMaxThreadCount(2)
         self.scan_thread = None
         self.scanner = None
         self.thread = None
@@ -598,21 +1096,189 @@ class Window(QMainWindow):
         self.playback_dialog.setWindowTitle('Playback do vídeo original')
         self.playback_dialog.resize(900, 600)
         playback_layout = QVBoxLayout(self.playback_dialog)
-        self.playback_view = QVideoWidget()
-        self.playback_view.setStyleSheet('background: #090d14;')
-        self.playback_view.installEventFilter(self)
-        playback_layout.addWidget(self.playback_view)
+        self.playback_sink = QVideoSink(self.playback_dialog)
+        self.playback_view = PlaybackVideoView()
+        self.playback_sink.videoFrameChanged.connect(self.playback_view.set_frame)
+        self.playback_view.doubleClicked.connect(self.playback_dialog.close)
+        playback_layout.addWidget(self.playback_view, 1)
+        playback_rotation_row = QHBoxLayout()
+        self.playback_rotate_ccw = QPushButton('↶  Girar 90°')
+        self.playback_rotate_cw = QPushButton('↷  Girar 90°')
+        self.playback_rotate_ccw.setToolTip('Girar 90° no sentido anti-horário')
+        self.playback_rotate_cw.setToolTip('Girar 90° no sentido horário')
+        self.playback_rotation_label = QLabel('Original')
+        self.playback_rotation_label.setObjectName('muted')
+        self.playback_rotate_ccw.clicked.connect(lambda: self.rotate_preview_dialog(-90))
+        self.playback_rotate_cw.clicked.connect(lambda: self.rotate_preview_dialog(90))
+        playback_rotation_row.addWidget(self.playback_rotate_ccw)
+        playback_rotation_row.addWidget(self.playback_rotate_cw)
+        self.playback_zoom = QComboBox()
+        self.playback_zoom.setToolTip('Ampliação deste vídeo')
+        for percent in (100, 105, 110, 115, 120, 125, 150, 200):
+            self.playback_zoom.addItem('Ajustar' if percent == 100 else f'{percent}%', percent)
+        self.playback_zoom.currentIndexChanged.connect(self.change_playback_zoom)
+        playback_rotation_row.addWidget(QLabel('Zoom'))
+        playback_rotation_row.addWidget(self.playback_zoom)
+        playback_rotation_row.addStretch()
+        playback_rotation_row.addWidget(self.playback_rotation_label)
+        playback_layout.addLayout(playback_rotation_row)
+        playback_seek_row = QHBoxLayout()
+        self.playback_seek = HoverTimeline()
+        self.playback_seek.setToolTip('Arraste o playhead ou passe o cursor pela linha do tempo para navegar pelo vídeo.')
+        self.playback_seek.setEnabled(False)
+        self.playback_time_label = QLabel('00:00 / 00:00')
+        self.playback_time_label.setObjectName('muted')
+        self.playback_seek.valueChanged.connect(self.seek_playback_value)
+        self.playback_seek.hoverPosition.connect(lambda seconds: self.player.setPosition(round(seconds * 1000)))
+        playback_seek_row.addWidget(self.playback_seek, 1)
+        playback_seek_row.addWidget(self.playback_time_label)
+        playback_layout.addLayout(playback_seek_row)
+        self.player.positionChanged.connect(self.update_playback_position)
+        self.player.durationChanged.connect(self.update_playback_duration)
+        self.player.durationChanged.connect(self.update_cut_duration)
+        self.player.positionChanged.connect(self.update_cut_playhead)
+        self.playback_path = None
+        self.thumbnail_playing_path = None
+        self.cut_path = None
+        self.cut_start_value = 0.0
+        self.cut_end_value = 0.0
         self.playback_dialog.finished.connect(self.restore_preview_output)
         self.player.playbackStateChanged.connect(self.preview_state_changed)
         self.player.errorOccurred.connect(self.preview_error)
         self.update_speed()
         self.update_ramp()
 
+        gallery_page = QWidget()
+        gallery_layout = QVBoxLayout(gallery_page)
+        gallery_layout.setContentsMargins(10, 10, 10, 10)
+        gallery_title = QLabel('03   Miniaturas, giro e zoom')
+        gallery_title.setObjectName('section')
+        gallery_layout.addWidget(gallery_title)
+        rotation_row = QHBoxLayout()
+        self.rotate_ccw = QPushButton('↶  90°')
+        self.rotate_cw = QPushButton('↷  90°')
+        self.rotate_ccw.setToolTip('Girar 90° no sentido anti-horário')
+        self.rotate_cw.setToolTip('Girar 90° no sentido horário')
+        self.rotation_status = QLabel('Selecione um vídeo para girar')
+        self.rotation_status.setObjectName('muted')
+        self.multi_select_button = QPushButton('Selecionar para girar')
+        self.multi_select_button.setToolTip('Seleciona os vídeos que serão girados juntos.')
+        self.multi_select_button.clicked.connect(self.toggle_multi_select)
+        self.rotate_ccw.setEnabled(False)
+        self.rotate_cw.setEnabled(False)
+        self.rotate_ccw.clicked.connect(lambda: self.rotate_selected(-90))
+        self.rotate_cw.clicked.connect(lambda: self.rotate_selected(90))
+        rotation_row.addWidget(self.rotate_ccw)
+        rotation_row.addWidget(self.rotate_cw)
+        rotation_row.addWidget(self.multi_select_button)
+        rotation_row.addStretch()
+        rotation_row.addWidget(self.rotation_status)
+        gallery_layout.addLayout(rotation_row)
+        zoom_row = QHBoxLayout()
+        zoom_row.addWidget(QLabel('Zoom'))
+        self.gallery_zoom = QComboBox()
+        for percent in (100, 105, 110, 115, 120, 125, 150, 200):
+            self.gallery_zoom.addItem('Ajustar' if percent == 100 else f'{percent}%', percent)
+        self.gallery_zoom.currentIndexChanged.connect(self.change_gallery_zoom)
+        zoom_row.addWidget(self.gallery_zoom)
+        self.zoom_select_button = QPushButton('Selecionar para ampliar')
+        self.zoom_select_button.setToolTip('Seleciona vídeos para aplicar o mesmo zoom em lote.')
+        self.zoom_select_button.clicked.connect(self.toggle_zoom_select)
+        zoom_row.addWidget(self.zoom_select_button)
+        zoom_row.addStretch()
+        self.zoom_status = QLabel('')
+        self.zoom_status.setObjectName('muted')
+        zoom_row.addWidget(self.zoom_status)
+        gallery_layout.addLayout(zoom_row)
+        self.gallery_scroll = QScrollArea()
+        self.gallery_scroll.setWidgetResizable(True)
+        self.gallery_scroll.setFrameShape(QFrame.NoFrame)
+        gallery_content = QWidget()
+        self.gallery_grid = QGridLayout(gallery_content)
+        self.gallery_grid.setContentsMargins(2, 2, 2, 2)
+        self.gallery_grid.setSpacing(9)
+        self.gallery_grid.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        self.gallery_scroll.setWidget(gallery_content)
+        gallery_layout.addWidget(self.gallery_scroll, 1)
+        size_row = QHBoxLayout()
+        size_label = QLabel('Tamanho das miniaturas')
+        size_label.setToolTip('Ajusta o tamanho dos cartões de vídeo sem alterar a proporção.')
+        self.thumbnail_size_slider = QSlider(Qt.Horizontal)
+        self.thumbnail_size_slider.setRange(190, 280)
+        self.thumbnail_size_slider.setValue(self.thumbnail_size)
+        self.thumbnail_size_slider.setToolTip('Ajusta o tamanho de todas as miniaturas.')
+        self.thumbnail_size_value = QLabel(f'{self.thumbnail_size} px')
+        self.thumbnail_size_slider.valueChanged.connect(self.set_thumbnail_size)
+        size_row.addWidget(size_label)
+        size_row.addWidget(self.thumbnail_size_slider, 1)
+        size_row.addWidget(self.thumbnail_size_value)
+        gallery_layout.addLayout(size_row)
+        self.tabs.addTab(gallery_page, '03  Miniaturas')
+        self.update_gallery()
+
+        cut_page = QWidget()
+        cut_layout = QVBoxLayout(cut_page)
+        cut_layout.setContentsMargins(10, 10, 10, 10)
+        cut_title = QLabel('04   Cortar vídeos')
+        cut_title.setObjectName('section')
+        cut_layout.addWidget(cut_title)
+        self.cut_sink = QVideoSink(self)
+        self.cut_preview = PlaybackVideoView()
+        self.cut_preview.setMinimumHeight(220)
+        self.cut_preview.setMaximumHeight(360)
+        self.cut_sink.videoFrameChanged.connect(self.cut_preview.set_frame)
+        cut_layout.addWidget(self.cut_preview, 1)
+        cut_play_row = QHBoxLayout()
+        self.cut_play_button = QPushButton('▶')
+        self.cut_play_button.setFixedWidth(46)
+        self.cut_play_button.clicked.connect(self.toggle_cut_playback)
+        cut_play_row.addWidget(self.cut_play_button)
+        self.cut_playhead = QSlider(Qt.Horizontal)
+        self.cut_playhead.setRange(0, 1000)
+        self.cut_playhead.sliderMoved.connect(self.seek_cut_position)
+        cut_play_row.addWidget(self.cut_playhead, 1)
+        self.cut_playhead_time = QLabel('00:00 / 00:00')
+        cut_play_row.addWidget(self.cut_playhead_time)
+        cut_layout.addLayout(cut_play_row)
+        self.trim_filmstrip = TrimFilmstrip()
+        self.trim_filmstrip.rangeChanged.connect(self.trim_range_changed)
+        cut_layout.addWidget(self.trim_filmstrip)
+        trim_row = QHBoxLayout()
+        trim_row.addWidget(QLabel('Início'))
+        self.trim_start_field = QDoubleSpinBox()
+        self.trim_start_field.setRange(0, 86400)
+        self.trim_start_field.setDecimals(1)
+        self.trim_start_field.setSuffix(' s')
+        self.trim_start_field.valueChanged.connect(self.trim_fields_changed)
+        trim_row.addWidget(self.trim_start_field)
+        trim_row.addWidget(QLabel('Fim'))
+        self.trim_end_field = QDoubleSpinBox()
+        self.trim_end_field.setRange(0, 86400)
+        self.trim_end_field.setDecimals(1)
+        self.trim_end_field.setSuffix(' s')
+        self.trim_end_field.valueChanged.connect(self.trim_fields_changed)
+        trim_row.addWidget(self.trim_end_field)
+        trim_row.addStretch()
+        self.trim_duration_label = QLabel('Duração final: —')
+        trim_row.addWidget(self.trim_duration_label)
+        cut_layout.addLayout(trim_row)
+        self.cut_filmstrip = QHBoxLayout()
+        self.cut_filmstrip.setSpacing(8)
+        self.cut_filmstrip_container = QWidget()
+        self.cut_filmstrip_container.setLayout(self.cut_filmstrip)
+        cut_scroll = QScrollArea()
+        cut_scroll.setWidgetResizable(True)
+        cut_scroll.setFixedHeight(150)
+        cut_scroll.setWidget(self.cut_filmstrip_container)
+        cut_layout.addWidget(cut_scroll)
+        self.tabs.addTab(cut_page, '04  Cortar')
+        self.tabs.currentChanged.connect(self.cut_tab_changed)
+
         export_page = QWidget()
         export_layout = QVBoxLayout(export_page)
-        self.destination, output = self.section('03   Exportação', export_layout)
+        self.destination, output = self.section('05   Exportação', export_layout)
         self.destination.setFixedHeight(104)
-        self.tabs.addTab(export_page, '03  Exportação')
+        self.tabs.addTab(export_page, '05  Exportação')
         preset_box=QHBoxLayout();preset_box.addWidget(QLabel('Presets de edição:'))
         self.preset_combo=QComboBox();self.preset_combo.setMaxVisibleItems(5);self.preset_combo.setMinimumWidth(130)
         preset_box.addWidget(self.preset_combo,1)
@@ -728,6 +1394,12 @@ class Window(QMainWindow):
             self.finish_action: 'Escolhe o que acontece quando a edição terminar.', self.start: 'Inicia a edição da fila.',
             self.pause: 'Pausa ou retoma o processamento.', self.cancel: 'Cancela o lote atual.', self.exit_button: 'Fecha o editor.',
             self.open_output: 'Abre a pasta de destino no Finder.', self.play_overlay: 'Reproduz ou pausa o vídeo original selecionado.',
+            self.rotate_ccw: 'Gira o vídeo selecionado 90 graus no sentido anti-horário, também na exportação.',
+            self.rotate_cw: 'Gira o vídeo selecionado 90 graus no sentido horário, também na exportação.',
+            self.gallery_scroll: 'Miniaturas do vídeo original, antes dos efeitos. Passe o cursor na linha do tempo para percorrer os quadros.',
+            self.playback_rotate_ccw: 'Gira o vídeo aberto 90 graus no sentido anti-horário.',
+            self.playback_rotate_cw: 'Gira o vídeo aberto 90 graus no sentido horário.',
+            self.playback_seek: 'Arraste o playhead ou passe o cursor sobre a linha para mudar a posição do vídeo.',
         }
         for control, tip in tips.items():
             control.setToolTip(tip)
@@ -930,6 +1602,7 @@ class Window(QMainWindow):
             self.player.setSource(QUrl.fromLocalFile(str(path)))
         else:
             self.player.setSource(QUrl())
+        self.update_gallery_selection()
 
     def toggle_preview(self):
         if self.player.playbackState() == QMediaPlayer.PlayingState:
@@ -941,27 +1614,172 @@ class Window(QMainWindow):
         playing = state == QMediaPlayer.PlayingState
         self.video_preview.set_playing(playing)
         self.play_overlay.setText('Ⅱ' if playing else '▶')
+        card = self.thumbnail_cards.get(self.thumbnail_playing_path)
+        if card:
+            card.set_playing(playing)
+        if self.cut_path and self.tabs.currentIndex() == 3 and self.player.source().toLocalFile() == self.cut_path:
+            self.cut_play_button.setText('Ⅱ' if playing else '▶')
 
     def open_current_video(self):
         row = self.list.currentRow()
         if 0 <= row < len(self.files):
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.files[row])))
 
-    def open_playback_window(self):
+    def open_playback_window(self, fullscreen=False):
         row = self.list.currentRow()
         if 0 <= row < len(self.files):
-            self.player.setVideoOutput(self.playback_view)
+            self.playback_path = str(self.files[row])
+            angle = self.file_rotations.get(self.playback_path, 0) % 360
+            self.apply_playback_rotation(angle)
+            self.sync_zoom_combo(self.playback_zoom, self.file_zooms.get(self.playback_path, 1.0))
+            self.playback_view.set_zoom(self.file_zooms.get(self.playback_path, 1.0))
+            self.update_gallery_selection()
+            self.playback_seek.setValue(0)
+            self.playback_time_label.setText('00:00 / 00:00')
+            self.player.setVideoSink(self.playback_sink)
             self.playback_dialog.show()
+            if fullscreen:
+                self.playback_dialog.showMaximized()
             self.player.play()
+
+    def open_card_playback(self, path, fullscreen=False):
+        row = next((i for i, item in enumerate(self.files) if str(item) == path), -1)
+        if row < 0:
+            return
+        if not fullscreen:
+            if self.playback_path:
+                self.playback_dialog.close()
+            if self.thumbnail_playing_path == path and self.player.playbackState() == QMediaPlayer.PlayingState:
+                self.player.pause()
+                return
+            self.playback_dialog.hide()
+            self.playback_path = None
+            self.thumbnail_playing_path = path
+            self.list.setCurrentRow(row)
+            card = self.thumbnail_cards.get(path)
+            if card:
+                self.player.setVideoSink(card.video_sink)
+            self.player.play()
+            return
+        self.thumbnail_playing_path = None
+        self.list.setCurrentRow(row)
+        self.open_playback_window(fullscreen)
 
     def restore_preview_output(self):
         self.player.setVideoOutput(self.video_preview)
+        if self.thumbnail_playing_path:
+            card = self.thumbnail_cards.get(self.thumbnail_playing_path)
+            if card:
+                card.set_playing(False)
+        self.thumbnail_playing_path = None
         self.video_preview.set_playing(self.player.playbackState() == QMediaPlayer.PlayingState)
+        self.playback_path = None
+        self.update_gallery_selection()
+
+    def apply_playback_rotation(self, angle):
+        angle %= 360
+        self.playback_rotation_label.setText(f'{angle}°' if angle else 'Original')
+        self.playback_view.set_rotation(angle)
+
+    def sync_zoom_combo(self, combo, zoom):
+        index = combo.findData(round(zoom * 100))
+        combo.blockSignals(True)
+        combo.setCurrentIndex(max(0, index))
+        combo.blockSignals(False)
+
+    def set_video_zoom(self, targets, zoom):
+        for path in targets:
+            if zoom > 1.0:
+                self.file_zooms[path] = zoom
+            else:
+                self.file_zooms.pop(path, None)
+            card = self.thumbnail_cards.get(path)
+            if card:
+                card.set_zoom(zoom)
+            if self.playback_path == path:
+                self.playback_view.set_zoom(zoom)
+                self.sync_zoom_combo(self.playback_zoom, zoom)
+        self.update_gallery_selection()
+
+    def change_playback_zoom(self):
+        if self.playback_path:
+            self.set_video_zoom({self.playback_path}, self.playback_zoom.currentData() / 100)
+
+    def change_gallery_zoom(self):
+        if self.zoom_select_mode:
+            targets = set(self.zoom_selected)
+        else:
+            row = self.list.currentRow()
+            targets = {str(self.files[row])} if 0 <= row < len(self.files) else set()
+        if targets:
+            self.set_video_zoom(targets, self.gallery_zoom.currentData() / 100)
+
+    def rotate_preview_dialog(self, degrees):
+        path = self.playback_path
+        if not path:
+            return
+        angle = (self.file_rotations.get(path, 0) + degrees) % 360
+        if angle:
+            self.file_rotations[path] = angle
+        else:
+            self.file_rotations.pop(path, None)
+        card = self.thumbnail_cards.get(path)
+        if card:
+            card.refresh_rotation(angle)
+        self.apply_playback_rotation(angle)
+        self.update_gallery_selection()
+
+    def update_playback_duration(self, duration):
+        self.playback_seek.duration = max(0.0, duration / 1000)
+        self.playback_seek.setEnabled(duration > 0)
+        self.update_playback_position(self.player.position())
+
+    def update_playback_position(self, position):
+        duration = self.player.duration()
+        if duration <= 0:
+            self.playback_time_label.setText('00:00 / 00:00')
+            return
+        slider = self.playback_seek
+        slider.blockSignals(True)
+        slider.setValue(round(position / duration * slider.maximum()))
+        slider.blockSignals(False)
+        def stamp(milliseconds):
+            seconds = max(0, milliseconds // 1000)
+            return f'{seconds // 60:02d}:{seconds % 60:02d}'
+        self.playback_time_label.setText(f'{stamp(position)} / {stamp(duration)}')
+
+    def update_cut_playhead(self, position):
+        if not self.cut_path:
+            return
+        duration = self.player.duration()
+        if duration <= 0:
+            return
+        self.cut_playhead.blockSignals(True)
+        self.cut_playhead.setValue(round(position / duration * self.cut_playhead.maximum()))
+        self.cut_playhead.blockSignals(False)
+        self.cut_playhead_time.setText(f'{self._format_cut_time(position/1000)} / {self._format_cut_time(duration/1000)}')
+        end = self.cut_end_value or duration / 1000
+        if self.tabs.currentIndex() == 3 and self.player.playbackState() == QMediaPlayer.PlayingState and position >= end * 1000:
+            self.player.pause()
+            self.player.setPosition(round(end * 1000))
+
+    @staticmethod
+    def _format_cut_time(seconds):
+        seconds = max(0, int(seconds))
+        return f'{seconds//60:02d}:{seconds%60:02d}'
+
+    def seek_cut_position(self, value):
+        duration = self.player.duration()
+        if duration > 0:
+            target = round(value / max(1, self.cut_playhead.maximum()) * duration)
+            self.player.setPosition(max(round(self.cut_start_value*1000), min(target, round((self.cut_end_value or duration/1000)*1000))))
+
+    def seek_playback_value(self, value):
+        duration = self.player.duration()
+        if duration > 0:
+            self.player.setPosition(round(value / max(1, self.playback_seek.maximum()) * duration))
 
     def eventFilter(self, watched, event):
-        if watched is self.playback_view and event.type() == QEvent.MouseButtonDblClick:
-            self.playback_dialog.close()
-            return True
         return super().eventFilter(watched, event)
 
     def preview_error(self, error, message):
@@ -979,6 +1797,9 @@ class Window(QMainWindow):
         self.count.setText(f'{len(self.files)} vídeo(s) selecionado(s)')
         if self.files and self.list.currentRow() < 0:
             self.list.setCurrentRow(0)
+        self.update_gallery()
+        self.rebuild_cut_filmstrip()
+        QTimer.singleShot(1500, self.rebuild_cut_filmstrip)
 
     def scan_folder(self):
         folder = QFileDialog.getExistingDirectory(self, 'Buscar vídeos em pasta e subpastas',
@@ -1015,12 +1836,299 @@ class Window(QMainWindow):
             self.list.takeItem(row)
         self.count.setText(f'{len(self.files)} vídeo(s) selecionado(s)')
         self.update_preview(self.list.currentRow())
+        self.update_gallery()
 
     def clear_files(self):
         self.files.clear()
+        self.file_rotations.clear()
+        self.file_zooms.clear()
+        self.file_trims.clear()
+        self.multi_selected.clear()
+        self.zoom_selected.clear()
         self.list.clear()
         self.count.setText('Nenhum vídeo selecionado')
         self.update_preview(-1)
+        self.update_gallery()
+        self.rebuild_cut_filmstrip()
+
+    def rebuild_cut_filmstrip(self):
+        while self.cut_filmstrip.count():
+            item = self.cut_filmstrip.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        for path in self.files:
+            key = str(path)
+            start, end = self.file_trims.get(key, (0.0, None))
+            shortened = start > 0 or end is not None
+            label = f'✂  {Path(key).name}' if shortened else Path(key).name
+            button = QToolButton()
+            button.setText(label)
+            button.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
+            button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            button.setMinimumWidth(170)
+            button.setFixedHeight(112)
+            card = self.thumbnail_cards.get(key)
+            if card and not card.preview.pixmap().isNull():
+                button.setIcon(QIcon(card.preview.pixmap()))
+                button.setIconSize(QSize(220, 78))
+            button.setStyleSheet('QToolButton { text-align: center; padding: 3px; }')
+            button.setToolTip('Corte aplicado' if shortened else 'Vídeo sem corte')
+            button.setProperty('cut', shortened)
+            button.clicked.connect(lambda _=False, selected=key: self.select_cut_video(selected))
+            self.cut_filmstrip.addWidget(button)
+        self.cut_filmstrip.addStretch()
+        if self.files and not self.cut_path:
+            self.select_cut_video(str(self.files[0]))
+
+    def select_cut_video(self, path):
+        self.cut_path = path
+        row = next((i for i, item in enumerate(self.files) if str(item) == path), -1)
+        if row < 0:
+            return
+        self.list.setCurrentRow(row)
+        start, end = self.file_trims.get(path, (0.0, None))
+        self.cut_start_value = start
+        self.cut_end_value = end
+        self.cut_preview.set_rotation(self.file_rotations.get(path, 0))
+        if self.tabs.currentWidget() == self.cut_preview.parentWidget():
+            self.player.stop()
+            self.player.setVideoSink(self.cut_sink)
+            self.player.setSource(QUrl.fromLocalFile(path))
+            self.player.play()
+            QTimer.singleShot(180, self.player.pause)
+        self.trim_filmstrip.set_frames([], 0)
+        self.cut_sheet_job = None
+        self.update_cut_duration()
+
+    def cut_tab_changed(self, index):
+        if self.tabs.tabText(index).startswith('04') and self.cut_path:
+            self.player.stop()
+            self.cut_preview.set_rotation(self.file_rotations.get(self.cut_path, 0))
+            self.player.setVideoSink(self.cut_sink)
+            self.player.setSource(QUrl.fromLocalFile(self.cut_path))
+            self.player.play()
+            QTimer.singleShot(180, self.player.pause)
+
+    def update_cut_duration(self, *_):
+        if not self.cut_path:
+            return
+        duration = max(0, self.player.duration() / 1000)
+        if duration:
+            start, end = self.file_trims.get(self.cut_path, (0.0, None))
+            end = end if end is not None else duration
+            self.trim_filmstrip.duration = duration
+            self.trim_filmstrip.set_range(start, end)
+            self.trim_start_field.setMaximum(duration)
+            self.trim_end_field.setMaximum(duration)
+            self.trim_start_field.blockSignals(True); self.trim_end_field.blockSignals(True)
+            self.trim_start_field.setValue(start); self.trim_end_field.setValue(end)
+            self.trim_start_field.blockSignals(False); self.trim_end_field.blockSignals(False)
+            self.trim_duration_label.setText(f'Duração final: {end-start:.1f} s')
+            if not getattr(self, 'cut_sheet_job', None):
+                rotation = self.file_rotations.get(self.cut_path, 0)
+                job = ThumbnailSheetJob(self.cut_path, duration, rotation)
+                job.signals.ready.connect(self.cut_sheet_ready)
+                self.cut_sheet_job = job
+                QThreadPool.globalInstance().start(job)
+
+    def cut_sheet_ready(self, path, rotation, data):
+        if path != self.cut_path:
+            return
+        sheet = QImage.fromData(data)
+        if sheet.isNull():
+            return
+        duration = self.player.duration() / 1000
+        all_frames = [sheet.copy(col*120, row*90, 120, 90)
+                      for row in range(6) for col in range(8)]
+        self.trim_filmstrip.set_frames(all_frames[::4], duration)
+
+    def trim_range_changed(self, start, end):
+        if not self.cut_path:
+            return
+        duration = self.player.duration()/1000
+        self.cut_start_value, self.cut_end_value = start, end
+        self.trim_start_field.blockSignals(True); self.trim_end_field.blockSignals(True)
+        self.trim_start_field.setValue(start); self.trim_end_field.setValue(end)
+        self.trim_start_field.blockSignals(False); self.trim_end_field.blockSignals(False)
+        if start <= 0 and duration and end >= duration - .02:
+            self.file_trims.pop(self.cut_path, None)
+        else:
+            self.file_trims[self.cut_path] = (start, end)
+        self.trim_duration_label.setText(f'Duração final: {end-start:.1f} s')
+        self.rebuild_cut_filmstrip()
+
+    def trim_fields_changed(self, *_):
+        start = self.trim_start_field.value()
+        end = self.trim_end_field.value()
+        duration = self.player.duration()/1000
+        if duration <= 0:
+            return
+        start = min(start, max(0, end - .05))
+        end = max(end, min(duration, start + .05))
+        self.trim_filmstrip.set_range(start, end)
+        self.trim_range_changed(start, end)
+
+    def toggle_cut_playback(self):
+        is_cut_source = self.player.source().toLocalFile() == self.cut_path
+        if is_cut_source and self.player.playbackState() == QMediaPlayer.PlayingState:
+            self.player.pause()
+        else:
+            if not is_cut_source:
+                self.player.stop()
+                self.player.setVideoSink(self.cut_sink)
+                self.player.setSource(QUrl.fromLocalFile(self.cut_path))
+            position = self.player.position()
+            if position < self.cut_start_value*1000 or position >= (self.cut_end_value or self.player.duration()/1000)*1000:
+                self.player.setPosition(round(self.cut_start_value * 1000))
+            self.player.play()
+
+    def update_gallery(self):
+        while self.gallery_grid.count():
+            item = self.gallery_grid.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self.thumbnail_cards.clear()
+        available = {str(path) for path in self.files}
+        self.multi_selected.intersection_update(available)
+        self.zoom_selected.intersection_update(available)
+        for index, path in enumerate(self.files):
+            key = str(path)
+            card = ThumbnailCard(path, self.file_rotations.get(key, 0),
+                                 self.multi_select_mode or self.zoom_select_mode,
+                                 key in (self.zoom_selected if self.zoom_select_mode else self.multi_selected),
+                                 zoom=self.file_zooms.get(key, 1.0))
+            card.select_box.setText('Ampliar' if self.zoom_select_mode else 'Girar')
+            card.selected.connect(self.select_gallery_path)
+            card.doubleClicked.connect(self.open_playback_window)
+            card.playRequested.connect(self.open_card_playback)
+            card.requestFrame.connect(self.request_thumbnail_frame)
+            card.selectionChanged.connect(self.multi_selection_changed)
+            card.set_card_width(self.thumbnail_size)
+            self.thumbnail_cards[key] = card
+            self.gallery_grid.addWidget(card, index // 2, index % 2)
+        if not self.files:
+            empty = QLabel('Adicione vídeos na aba 01 Entrada para ver as miniaturas aqui.')
+            empty.setObjectName('muted')
+            empty.setAlignment(Qt.AlignCenter)
+            self.gallery_grid.addWidget(empty, 0, 0, 1, 2)
+        self.update_gallery_selection()
+
+    def set_thumbnail_size(self, value):
+        self.thumbnail_size = int(value)
+        self.thumbnail_size_value.setText(f'{value} px')
+        for card in self.thumbnail_cards.values():
+            card.set_card_width(value)
+
+    def toggle_multi_select(self):
+        if self.busy:
+            return
+        self.multi_select_mode = not self.multi_select_mode
+        if self.multi_select_mode:
+            self.zoom_select_mode = False
+        self.refresh_batch_selection()
+
+    def toggle_zoom_select(self):
+        if self.busy:
+            return
+        self.zoom_select_mode = not self.zoom_select_mode
+        if self.zoom_select_mode:
+            self.multi_select_mode = False
+        self.refresh_batch_selection()
+
+    def refresh_batch_selection(self):
+        self.multi_select_button.setText('Concluir giro' if self.multi_select_mode else 'Selecionar para girar')
+        self.zoom_select_button.setText('Concluir zoom' if self.zoom_select_mode else 'Selecionar para ampliar')
+        selected = self.zoom_selected if self.zoom_select_mode else self.multi_selected
+        for path, card in self.thumbnail_cards.items():
+            card.select_box.blockSignals(True)
+            card.select_box.setText('Ampliar' if self.zoom_select_mode else 'Girar')
+            card.select_box.setChecked(path in selected)
+            card.select_box.blockSignals(False)
+            card.set_selection_mode(self.multi_select_mode or self.zoom_select_mode)
+        self.update_gallery_selection()
+
+    def multi_selection_changed(self, path, checked):
+        selected = self.zoom_selected if self.zoom_select_mode else self.multi_selected
+        if checked:
+            selected.add(path)
+        else:
+            selected.discard(path)
+        self.update_gallery_selection()
+
+    def request_thumbnail_frame(self, path, seconds, rotation):
+        card = self.thumbnail_cards.get(path)
+        if card is not None:
+            card.request(seconds)
+
+    def select_gallery_path(self, path):
+        row = next((i for i, item in enumerate(self.files) if str(item) == path), -1)
+        if row >= 0 and self.list.currentRow() != row:
+            self.list.setCurrentRow(row)
+        self.update_gallery_selection()
+
+    def update_gallery_selection(self, *_):
+        current = self.list.currentRow()
+        selected_path = str(self.files[current]) if 0 <= current < len(self.files) else None
+        for path, card in self.thumbnail_cards.items():
+            active = path == selected_path
+            if card.active and not active:
+                card.frames.clear()
+                card.sheet_requested = False
+            became_active = active and not card.active
+            card.active = active
+            if became_active and card.duration > 0 and not card.frames:
+                position = card.timeline.value() / max(1, card.timeline.maximum()) * card.duration
+                card.request(position)
+            card.setProperty('selected', path == selected_path)
+            card.style().unpolish(card)
+            card.style().polish(card)
+        enabled = selected_path is not None
+        rotation_targets = self.multi_selected if self.multi_select_mode else ({selected_path} if selected_path else set())
+        zoom_targets = self.zoom_selected if self.zoom_select_mode else ({selected_path} if selected_path else set())
+        can_rotate = bool(rotation_targets) and not self.busy and not self.zoom_select_mode
+        self.rotate_ccw.setEnabled(can_rotate)
+        self.rotate_cw.setEnabled(can_rotate)
+        self.gallery_zoom.setEnabled(bool(zoom_targets) and not self.busy and not self.multi_select_mode)
+        if not self.zoom_select_mode and selected_path:
+            self.sync_zoom_combo(self.gallery_zoom, self.file_zooms.get(selected_path, 1.0))
+        playback_open = self.playback_path is not None
+        self.playback_rotate_ccw.setEnabled(playback_open and not self.busy)
+        self.playback_rotate_cw.setEnabled(playback_open and not self.busy)
+        self.playback_zoom.setEnabled(playback_open and not self.busy)
+        self.multi_select_button.setEnabled(bool(self.files) and not self.busy)
+        self.zoom_select_button.setEnabled(bool(self.files) and not self.busy)
+        if self.multi_select_mode:
+            self.rotation_status.setText(f'{len(self.multi_selected)} vídeo(s) selecionado(s)')
+        elif enabled:
+            angle = self.file_rotations.get(selected_path, 0) % 360
+            self.rotation_status.setText(f'{Path(selected_path).name} · {angle}°' if angle else f'{Path(selected_path).name} · original')
+        else:
+            self.rotation_status.setText('Selecione um vídeo para girar')
+        self.zoom_status.setText(f'{len(self.zoom_selected)} vídeo(s) para ampliar' if self.zoom_select_mode else '')
+
+    def rotate_selected(self, degrees):
+        row = self.list.currentRow()
+        if self.multi_select_mode:
+            targets = set(self.multi_selected)
+        elif 0 <= row < len(self.files):
+            targets = {str(self.files[row])}
+        else:
+            targets = set()
+        if not targets:
+            return
+        for path in targets:
+            angle = (self.file_rotations.get(path, 0) + degrees) % 360
+            if angle:
+                self.file_rotations[path] = angle
+            else:
+                self.file_rotations.pop(path, None)
+            card = self.thumbnail_cards.get(path)
+            if card:
+                card.refresh_rotation(angle)
+            if self.playback_path == path:
+                self.apply_playback_rotation(angle)
+        self.update_gallery_selection()
 
     def pick_music(self):
         directory = str(self.music_path.parent) if self.music_path else self.drop.browse_directory
@@ -1072,6 +2180,7 @@ class Window(QMainWindow):
                               watermark_bold=watermark['bold'], watermark_italic=watermark['italic'],
                               watermark_underline=watermark['underline'],
                               watermark_color=watermark['color'],
+                              rotation=0,
                               workers=self.workers.currentData(),
                               ramp=self.ramp.isChecked(), ramp_duration=self.ramp_time.value(),
                               slow_duration=self.slow_time.value(), repetitions=self.repetitions.currentData(),
@@ -1092,6 +2201,7 @@ class Window(QMainWindow):
         self.batch_finish_action = self.finish_action.currentData()
         self.output_path = options.output
         self.busy = True
+        self.update_gallery_selection()
         for widget in (self.inputs, self.settings, self.destination, self.start):
             widget.setEnabled(False)
         self.cancel.setEnabled(True)
@@ -1101,7 +2211,7 @@ class Window(QMainWindow):
         self.current.setValue(0)
         self.status.setText('Iniciando...')
         self.logs.appendPlainText('\nIniciando...')
-        self.pending_batch = (list(self.files), options, jobs)
+        self.pending_batch = (list(self.files), options, jobs, dict(self.file_rotations), dict(self.file_zooms), dict(self.file_trims))
         self.launch_batch()
 
     def ask_conflict(self, target):
@@ -1149,13 +2259,13 @@ class Window(QMainWindow):
     def launch_batch(self):
         if self.pending_batch is None:
             return
-        files, options, jobs = self.pending_batch
+        files, options, jobs, rotations, zooms, trims = self.pending_batch
         self.pending_batch = None
         self.status.setText('Processando…')
         self.pause.setEnabled(True)
-        self.logs.appendPlainText('Iniciando lote · Editor Visual 3.10.0')
+        self.logs.appendPlainText('Iniciando lote · Editor Visual 3.28.0')
         self.thread = QThread(self)
-        self.worker = Batch(files, options, jobs)
+        self.worker = Batch(files, options, jobs, rotations, zooms, trims)
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
         self.worker.log.connect(self.logs.appendPlainText)
@@ -1191,6 +2301,7 @@ class Window(QMainWindow):
 
     def thread_finished(self):
         self.busy = False
+        self.update_gallery_selection()
         for widget in (self.inputs, self.settings, self.destination, self.start):
             widget.setEnabled(True)
         self.cancel.setEnabled(False)
@@ -1260,6 +2371,10 @@ QWidget { font-family: -apple-system, 'Helvetica Neue', sans-serif; font-size: 1
 QMainWindow, QMainWindow > QWidget { background: #11151d; }
 QMessageBox { background: #1b2230; }
 QFrame#card { background: #1b2230; border: 1px solid #303b4e; border-radius: 12px; }
+QFrame#thumbnailCard { background: #1b2230; border: 1px solid #303b4e; border-radius: 8px; }
+QFrame#thumbnailCard[selected="true"] { border: 2px solid #5596ff; background: #202c40; }
+QLabel#rotationMark { color: white; background: rgba(30, 41, 59, 220); border: 1px solid #8295b4; border-radius: 6px; font-weight: 600; }
+QPushButton#thumbnailPlaybackButton { color: white; background: rgba(30, 41, 59, 225); border: 1px solid #8295b4; border-radius: 7px; font-weight: 700; padding: 0; }
 QLabel#heading { font-size: 23px; font-weight: 700; }
 QLabel#section { font-size: 13px; font-weight: 600; color: #a9c8ff; padding-bottom: 2px; }
 QLabel#muted { color: #a2aec2; font-size: 12px; }

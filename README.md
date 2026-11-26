@@ -1,10 +1,10 @@
-# Editor Visual · 3.10.0
+# Editor Visual · 3.28.0
 
 Projeto open source sob a licença MIT. Consulte [LICENSE](LICENSE) para os termos.
 
 ## Abas e presets
 
-A interface está organizada nas abas **01 Entrada**, **02 Edição** e **03 Exportação**. Na aba Exportação, é possível salvar até cinco presets. Eles ficam em `~/Documents/Sports Video Editor Presets.xml` e podem ser transferidos entre computadores.
+A interface está organizada nas abas **01 Entrada**, **02 Edição**, **03 Miniaturas** e **04 Exportação**. Na aba Exportação, é possível salvar até cinco presets. Eles ficam em `~/Documents/Sports Video Editor Presets.xml` e podem ser transferidos entre computadores.
 
 ## Marca-d’água
 
@@ -96,6 +96,8 @@ As transições alteram os timestamps continuamente, sem interpolação de quadr
 
 Selecione um vídeo na **Fila de edição** para carregá-lo no painel de pré-visualização, à direita das opções. Use **▶️ Reproduzir** e **⏸️ Pausar prévia** para conferir o arquivo original, sem áudio. Os efeitos e cortes são aplicados na exportação. A prévia é interrompida automaticamente ao iniciar o lote, liberando o decodificador antes da exportação.
 
+Na aba **03 Miniaturas**, veja os vídeos originais em cartões de tamanho uniforme. O slider no rodapé ajusta a área de prévia; o nome e a linha do tempo mantêm altura fixa e ficam próximos. Passe o cursor pela linha do tempo de cada miniatura para percorrer os quadros originais, sem os efeitos da aba 02. A miniatura ativa prepara uma folha de quadros em segundo plano e reaproveita as imagens durante o percurso para responder rapidamente ao movimento do cursor. Os controles no topo giram o vídeo selecionado em passos de 90 graus; use **Selecionar vários vídeos** para marcar uma seleção e girar todos juntos. O marcador na miniatura mostra a rotação, que também é aplicada ao arquivo exportado. Ao dar duplo clique, a janela ampliada também oferece controles para girar e uma linha do tempo para navegar pelo vídeo; ela abre com a rotação atual aplicada.
+
 ## Comportamento herdado
 
 - Exportação HEVC ou H.264 por hardware Apple VideoToolbox, pixel format YUV420P, MP4 com faststart e slow em 24 fps e opção de fluidez adaptativa por trecho. HEVC usa identificação `hvc1` para compatibilidade Apple.
@@ -123,6 +125,42 @@ Arquitetura: [interface](editor.py), [motor](engine.py), [testes](test_engine.py
 **3.9.0 · 28/10/2026:** sliders com campos numéricos para tempos de fade e velocidade, com ajuste em décimos e compatibilidade com preferências anteriores.
 
 **3.10.0 · 30/10/2026:** sublinhado real na exportação via libass, setas consistentes nos campos numéricos e início imediato do lote, sem espera inicial.
+
+**3.11.0 · 26/11/2026:** nova aba de miniaturas, busca de quadros ao passar o cursor pela linha do tempo e rotação individual em passos de 90 graus, aplicada também à exportação.
+
+**3.12.0 · 26/11/2026:** miniaturas com tamanho uniforme, controle deslizante de tamanho e rotação em lote com seleção múltipla.
+
+**3.13.0 · 26/11/2026:** nome e linha do tempo compactos com altura fixa; área 4:3 maior para miniaturas, mantendo a proporção dos vídeos.
+
+**3.14.0 · 26/11/2026:** percurso na linha do tempo com quadros do original pré-carregados em segundo plano e reutilizados enquanto o cursor se move.
+
+**3.15.0 · 26/11/2026:** janela ampliada com rotação ao vivo e playhead para buscar posições no vídeo.
+
+**3.16.0 · 26/11/2026:** reenquadramento da prévia ampliada ao girar o vídeo, para aproveitar o espaço disponível.
+
+**3.17.0 · 26/11/2026:** corrige o tamanho da imagem na prévia ampliada após rotação, preservando a geometria nativa do vídeo e reenquadrando seus limites girados.
+
+**3.18.0 · 26/11/2026:** a prévia ampliada desenha cada quadro com uma única escala calculada após a rotação, preenchendo o espaço disponível.
+
+**3.19.0 · 26/11/2026:** zoom individual de 105% a 200% nas miniaturas e na prévia ampliada, com aplicação em lote aos vídeos selecionados e no vídeo exportado.
+
+**3.20.0 · 26/11/2026:** botões de giro compactos com indicação do sentido ao passar o mouse; seleção em lote de zoom independente da seleção de rotação.
+
+**3.21.0 · 26/11/2026:** botões de reprodução e tela cheia sobre cada miniatura, sem controles adicionais de tempo ou volume.
+
+**3.22.0 · 26/11/2026:** reposiciona reprodução antes do playhead e tela cheia depois dele em cada miniatura.
+
+**3.23.0 · 26/11/2026:** a reprodução dentro da miniatura aplica a rotação individual configurada para o vídeo.
+
+**3.24.0 · 26/11/2026:** nova aba Cortar, com ajuste individual de início e fim, filmstrip dos vídeos e marca de tesoura; os trechos escolhidos são respeitados na exportação.
+
+**3.25.0 · 26/11/2026:** refaz a aba Cortar com quadros visuais na timeline e seleção do trecho por alças arrastáveis, além de filmstrip inferior com prévias dos vídeos e marca de tesoura.
+
+**3.26.0 · 26/11/2026:** quadros de corte maiores e espaçados; miniaturas da filmstrip inferior centralizadas e distribuídas pela largura disponível.
+
+**3.27.0 · 26/11/2026:** prévia da aba de corte respeita rotação da aba 03; controles não ficam encobertos, com playhead, tempos atual/inicial/final e duração total.
+
+**3.28.0 · 26/11/2026:** corrige a alternância play/pause da aba de corte e adiciona campos numéricos sincronizados com as alças visuais de início e fim.
 
 **3.8.0 · 28/10/2026:** controle do tempo rápido antes de cada rampa e opções de velocidade lenta 0,75× e rápida 0,8×.
 
