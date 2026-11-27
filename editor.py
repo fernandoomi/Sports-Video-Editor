@@ -1,4 +1,4 @@
-"""Sports Video Editor 3.29.0 — aplicativo Qt para macOS."""
+"""Sports Video Editor 3.29.1 — aplicativo Qt para macOS."""
 from __future__ import annotations
 
 import math
@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = 'Sports Video Editor'
-APP_VERSION = '3.29.0'
+APP_VERSION = '3.29.1'
 GITHUB_URL = 'https://github.com/fernandoomi/Sports-Video-Editor'
 
 from engine import (AUDIO_EXTS, VIDEO_EXTS, Cancelled, Options, ProcessingControl, binary,
@@ -1455,7 +1455,7 @@ class Window(QMainWindow):
             build_date = 'Executado do código-fonte (sem compilação)'
 
         details = QLabel(
-            '<b>Autor:</b> Fernando (fernandoomi)<br>'
+            '<b>Autor:</b> Fernando Belmonte de Souza<br>'
             '<b>Linguagem:</b> Python<br>'
             '<b>Bibliotecas e ferramentas:</b> PySide6 (Qt), FFmpeg e FFprobe<br>'
             f'<b>Data da compilação:</b> {build_date}<br>'
