@@ -1,4 +1,4 @@
-# Editor Visual · 3.28.0
+# Sports Video Editor · 3.29.0
 
 Projeto open source sob a licença MIT. Consulte [LICENSE](LICENSE) para os termos.
 
@@ -161,6 +161,8 @@ Arquitetura: [interface](editor.py), [motor](engine.py), [testes](test_engine.py
 **3.27.0 · 26/11/2026:** prévia da aba de corte respeita rotação da aba 03; controles não ficam encobertos, com playhead, tempos atual/inicial/final e duração total.
 
 **3.28.0 · 26/11/2026:** corrige a alternância play/pause da aba de corte e adiciona campos numéricos sincronizados com as alças visuais de início e fim.
+
+**3.29.0 · 26/11/2026:** identifica o aplicativo e sua versão na janela e inclui o menu **Ajuda → Sobre**, com dados do projeto e data da compilação.
 
 **3.8.0 · 28/10/2026:** controle do tempo rápido antes de cada rampa e opções de velocidade lenta 0,75× e rápida 0,8×.
 

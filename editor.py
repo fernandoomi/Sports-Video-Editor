@@ -1,4 +1,4 @@
-"""Editor Visual 3.28.0 — aplicativo Qt para macOS."""
+"""Sports Video Editor 3.29.0 — aplicativo Qt para macOS."""
 from __future__ import annotations
 
 import math
@@ -9,12 +9,13 @@ import threading
 import sys
 import time
 import xml.etree.ElementTree as ET
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QSettings, QThread, QTimer, Signal, Qt, QUrl, QRegularExpression, QEvent, QRunnable, QThreadPool, QRectF, QSize
-from PySide6.QtGui import QDesktopServices, QRegularExpressionValidator, QValidator, QImage, QPixmap, QFontMetrics, QPainter, QTransform, QColor, QIcon
+from PySide6.QtGui import QAction, QDesktopServices, QRegularExpressionValidator, QValidator, QImage, QPixmap, QFontMetrics, QPainter, QTransform, QColor, QIcon
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -22,6 +23,10 @@ from PySide6.QtWidgets import (
     QHBoxLayout, QLabel, QLineEdit, QListWidget, QMainWindow, QMessageBox,
     QPlainTextEdit, QProgressBar, QPushButton, QSizePolicy, QSlider, QVBoxLayout, QWidget,
 )
+
+APP_NAME = 'Sports Video Editor'
+APP_VERSION = '3.29.0'
+GITHUB_URL = 'https://github.com/fernandoomi/Sports-Video-Editor'
 
 from engine import (AUDIO_EXTS, VIDEO_EXTS, Cancelled, Options, ProcessingControl, binary,
                     probe, process_video, reserve_outputs)
@@ -838,7 +843,11 @@ class Window(QMainWindow):
         self.output_path = None
         self.pending_batch = None
         self.completion_result = None
-        self.setWindowTitle('Sports Video Editor')
+        self.setWindowTitle(f'{APP_NAME} · {APP_VERSION}')
+        help_menu = self.menuBar().addMenu('Ajuda')
+        about_action = QAction('Sobre', self)
+        about_action.triggered.connect(self.show_about_dialog)
+        help_menu.addAction(about_action)
         self.setFixedSize(680, 706)
         content = QWidget()
         root = QVBoxLayout(content)
@@ -850,7 +859,7 @@ class Window(QMainWindow):
         header = QHBoxLayout()
         header.addWidget(heading)
         header.addStretch()
-        subtitle = QLabel('Seus vídeos, prontos em poucos passos.')
+        subtitle = QLabel(f'{APP_NAME} · versão {APP_VERSION}')
         subtitle.setObjectName('muted')
         header.addWidget(subtitle)
         root.addLayout(header)
@@ -1426,6 +1435,46 @@ class Window(QMainWindow):
                 widget.textChanged.connect(self.schedule_preferences_save)
         if migrate_sq:
             self.save_preferences()
+
+    def show_about_dialog(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f'Sobre {APP_NAME}')
+        dialog.setModal(True)
+        dialog.setMinimumWidth(420)
+        layout = QVBoxLayout(dialog)
+        title = QLabel(f'<h2>{APP_NAME}</h2><p>Versão {APP_VERSION}</p>')
+        title.setTextFormat(Qt.RichText)
+        layout.addWidget(title)
+
+        if getattr(sys, 'frozen', False):
+            try:
+                build_date = datetime.fromtimestamp(Path(sys.executable).stat().st_mtime).strftime('%d/%m/%Y')
+            except OSError:
+                build_date = 'Não disponível'
+        else:
+            build_date = 'Executado do código-fonte (sem compilação)'
+
+        details = QLabel(
+            '<b>Autor:</b> Fernando (fernandoomi)<br>'
+            '<b>Linguagem:</b> Python<br>'
+            '<b>Bibliotecas e ferramentas:</b> PySide6 (Qt), FFmpeg e FFprobe<br>'
+            f'<b>Data da compilação:</b> {build_date}<br>'
+            '<b>E-mail:</b> <a href="mailto:fernandoomi@yahoo.com.br">fernandoomi@yahoo.com.br</a><br>'
+            '<b>Site:</b> <a href="https://www.bemcorrido.com.br">www.bemcorrido.com.br</a><br>'
+            f'<b>Projeto no GitHub:</b> <a href="{GITHUB_URL}">fernandoomi/Sports-Video-Editor</a>'
+        )
+        details.setTextFormat(Qt.RichText)
+        details.setOpenExternalLinks(True)
+        details.setWordWrap(True)
+        layout.addWidget(details)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        close_button = QPushButton('Fechar')
+        close_button.clicked.connect(dialog.accept)
+        buttons.addWidget(close_button)
+        layout.addLayout(buttons)
+        dialog.exec()
 
     def preference_widgets(self):
         names = ('fade', 'fade_time', 'fade_out_video', 'fade_out_video_time', 'fade_out_audio', 'fade_out_audio_time', 'music', 'speed', 'fast_speed', 'fast_time', 'ramp', 'ramp_time', 'slow_time',
@@ -2263,7 +2312,7 @@ class Window(QMainWindow):
         self.pending_batch = None
         self.status.setText('Processando…')
         self.pause.setEnabled(True)
-        self.logs.appendPlainText('Iniciando lote · Editor Visual 3.28.0')
+        self.logs.appendPlainText(f'Iniciando lote · {APP_NAME} {APP_VERSION}')
         self.thread = QThread(self)
         self.worker = Batch(files, options, jobs, rotations, zooms, trims)
         self.worker.moveToThread(self.thread)
